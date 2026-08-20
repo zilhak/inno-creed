@@ -5,7 +5,8 @@
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
-const BUNDLED: &str = include_str!("../data/submission_guides.json");
+/// `approval_submit`의 신원 주입 회귀 테스트가 **실제 번들 payload**로 훑기 위해 참조한다.
+pub(crate) const BUNDLED: &str = include_str!("../data/submission_guides.json");
 
 fn bundled() -> Value {
     serde_json::from_str(BUNDLED).expect("번들 신청 가이드 JSON 파싱 실패")

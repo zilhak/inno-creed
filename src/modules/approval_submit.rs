@@ -416,6 +416,11 @@ struct Identity {
 /// 직책 `singleDutyNm`, 조합문자열 `empNmDutyNm`("이름 직책")·`employees`("이름 직급").
 /// `employees`는 신청 대상자 목록이지만 MCP 상신은 항상 **본인 1인** 기준이라 단일값으로 채운다.
 fn inject_identity(item: &mut Value, id: &Identity) {
+    // `groupByKey`("<empCd><날짜>" — 예 "1109720260803")처럼 **empCd를 접두사로 품은 조합 문자열**이
+    // 있다. empCd만 갈아끼우면 이쪽은 예시 작성자의 사번을 그대로 달고 나간다.
+    // 덮어쓰기 전에 옛 empCd를 붙잡아 둔다.
+    let old_emp = item.get("empCd").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
     let emp_duty = if id.duty.is_empty() {
         String::new()
     } else {
@@ -432,9 +437,58 @@ fn inject_identity(item: &mut Value, id: &Identity) {
         ("deptNm", id.dept_nm.as_str()), ("deptName", id.dept_nm.as_str()),
         ("singleDeptNm", id.dept_nm.as_str()), ("divNm", id.co_nm.as_str()),
         ("singlePositionNm", id.position.as_str()), ("singleDutyNm", id.duty.as_str()),
+        // `single*` 없는 짧은 이름도 온다 — 본문 표(TABLE.dbTable1)가 이쪽을 쓴다.
+        ("positionNm", id.position.as_str()), ("dutyNm", id.duty.as_str()),
         ("empNmDutyNm", emp_duty.as_str()), ("employees", emp_position.as_str()),
     ] {
         overwrite_if_present(item, k, val);
+    }
+
+    // 조합 키의 empCd 접두사 교체. 옛 사번으로 시작할 때만 손댄다 — 형식이 다르면 두는 편이 낫다.
+    if !old_emp.is_empty() && old_emp != id.emp && !id.emp.is_empty() {
+        let swapped = item
+            .get("groupByKey")
+            .and_then(|v| v.as_str())
+            .and_then(|v| v.strip_prefix(old_emp.as_str()))
+            .map(|rest| format!("{}{rest}", id.emp));
+        if let Some(new) = swapped
+            && let Some(obj) = item.as_object_mut()
+        {
+            obj.insert("groupByKey".into(), Value::String(new));
+        }
+    }
+}
+
+/// `inject_identity`를 **JSON 트리 전체**에 적용한다.
+///
+/// ⚠️ 방문 대상을 손으로 열거하던 예전 방식이 실제로 샜다. 주입이 `bindData.ITEMS` 최상위와
+/// `applicationList[]`/`employeeList[]` **직속 필드**만 돌아서, 아래 세 갈래가 예시 작성자의
+/// 신원을 그대로 달고 나갔다(2026-08-20 전수 대조로 발견 — 4개 양식 중 3개, 20곳):
+///  - `bindData.TABLE.dbTable1.group[].items` — **문서 본문 표에 렌더되는** 사번·이름·부서·직급
+///  - `applicationList[].employeeList[]` — 한 겹 더 중첩돼 최상위 열거에서 빠짐(휴일주말근무)
+///  - `weeklyOvertimeWorkInfo` 등 중첩 오브젝트의 `empCd`
+///
+/// 메일함 seq 사고와 달리 **이쪽은 실패하지 않고 성공한다** — 문서는 정상 접수되고 근태 레코드만
+/// 남의 사번으로 남는다. 그래서 열거 대신 트리를 통째로 훑는다. **새 양식이 추가돼도 자동으로 걸린다.**
+///
+/// ⚠️ 전제: 이 페이로드의 신원은 **전부 기안자 본인**이다(근태 4양식은 본인 신청뿐). 타인의 신원을
+/// 정당하게 싣는 양식이 생기면 이 함수가 그것까지 덮어쓰므로, 그때는 예외 경로가 필요하다.
+fn inject_identity_deep(node: &mut Value, id: &Identity) {
+    match node {
+        Value::Object(_) => {
+            inject_identity(node, id);
+            if let Some(obj) = node.as_object_mut() {
+                for v in obj.values_mut() {
+                    inject_identity_deep(v, id);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for v in items.iter_mut() {
+                inject_identity_deep(v, id);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -481,10 +535,8 @@ pub async fn submit_approval(
     // bindData 검증(유효 JSON이어야 함)
     let mut bind_obj: Value = serde_json::from_str(bind_data_json)
         .map_err(|e| anyhow!("bind_data_json이 유효한 JSON이 아님: {e}"))?;
-    // 신원 자동 주입: bindData ITEMS의 신원 표시필드(empNm 등)를 로그인 사용자 값으로.
-    if let Some(items) = bind_obj.get_mut("ITEMS") {
-        inject_identity(items, &id);
-    }
+    // 신원 자동 주입: 트리 전체(ITEMS뿐 아니라 **문서 본문 표인 TABLE.dbTable1.group[].items까지**).
+    inject_identity_deep(&mut bind_obj, &id);
     // 이중 인코딩: 최종 wire 값 = JSON.stringify(JSON.stringify(bindObj)).
     let s1 = serde_json::to_string(&bind_obj)?; // {"ITEMS":...}
     let bind_data_field = Value::String(serde_json::to_string(&s1)?); // "{\"ITEMS\":...}"
@@ -506,14 +558,9 @@ pub async fn submit_approval(
     if !hp_application_json.trim().is_empty() {
         let mut hp_body: Value = serde_json::from_str(hp_application_json)
             .map_err(|e| anyhow!("hp_application_json이 유효한 JSON이 아님: {e}"))?;
-        // 신원 자동 주입: applicationList/employeeList 각 항목의 coCd/deptCd/empCd/이름을 로그인 사용자 값으로.
-        for key in ["applicationList", "employeeList"] {
-            if let Some(list) = hp_body.get_mut(key).and_then(|v| v.as_array_mut()) {
-                for it in list.iter_mut() {
-                    inject_identity(it, &id);
-                }
-            }
-        }
+        // 신원 자동 주입: 트리 전체. 최상위 applicationList/employeeList뿐 아니라 **중첩된
+        // applicationList[].employeeList[]와 weeklyOvertimeWorkInfo 같은 하위 오브젝트까지** 닿는다.
+        inject_identity_deep(&mut hp_body, &id);
         let create_body = json!({
             "coCd": "", "appDt": "", "appEmpCd": id.emp, "deptCd": "",
             "titleDc": doc_title, "approLineId": line_id.to_string(),
@@ -1214,6 +1261,87 @@ mod tests {
         assert_eq!(v.get("postDocSts"), None, "하지 않은 조회를 한 것처럼 적으면 안 된다");
         assert_eq!(v.get("postState"), None);
         assert!(v["note"].as_str().unwrap().contains("실행한 단계 없음"));
+    }
+
+    /// 회귀: 신원 주입이 방문할 곳을 손으로 열거하던 시절, `bindData.TABLE...group[].items`·
+    /// 중첩 `applicationList[].employeeList[]`·`weeklyOvertimeWorkInfo`가 빠져 **예시 작성자의
+    /// 사번·이름·부서가 그대로 상신**됐다(4개 양식 중 3개, 20곳). 이쪽은 실패하지 않고 성공해서
+    /// 아무도 못 본다 — **번들된 실제 가이드 payload**로 훑어 흔적이 하나도 없음을 못박는다.
+    #[test]
+    fn 실제_가이드_예시에_예시작성자_신원이_남지_않는다() {
+        let guides: Value = serde_json::from_str(crate::modules::submission_guide::BUNDLED)
+            .expect("번들 가이드가 유효한 JSON이어야 한다");
+        let forms = guides["forms"].as_object().expect("forms 오브젝트");
+        let id = me();
+
+        // 예시 작성자를 가리키는 값들. 하나라도 남으면 남의 신원이 문서에 찍힌다.
+        const AUTHOR: [&str; 5] = ["11097", "이재학", "AA121", "네이티브 플랫폼팀", "책임연구원"];
+
+        /// 트리에서 예시 작성자 흔적이 있는 경로를 모은다.
+        fn traces(node: &Value, path: &str, out: &mut Vec<String>) {
+            match node {
+                Value::Object(map) => {
+                    for (k, v) in map {
+                        traces(v, &format!("{path}/{k}"), out);
+                    }
+                }
+                Value::Array(items) => {
+                    for (i, v) in items.iter().enumerate() {
+                        traces(v, &format!("{path}[{i}]"), out);
+                    }
+                }
+                Value::String(s) if AUTHOR.iter().any(|a| s.contains(a)) => {
+                    out.push(format!("{path} = {s}"))
+                }
+                _ => {}
+            }
+        }
+
+        let mut checked = 0;
+        for (form, g) in forms {
+            for key in ["hpApplicationExample", "bindDataExample"] {
+                // 예시는 JSON 문자열이 아니라 오브젝트로 들어 있다(양쪽 다 받아둔다).
+                let Some(raw) = g["draftHelp"].get(key) else { continue };
+                let mut payload: Value = match raw.as_str() {
+                    Some(text) => serde_json::from_str(text)
+                        .unwrap_or_else(|e| panic!("{form}/{key} 예시가 유효한 JSON이 아니다: {e}")),
+                    None => raw.clone(),
+                };
+
+                // 주입 전에는 흔적이 있어야 한다 — 없으면 이 테스트가 아무것도 지키지 못한다.
+                let mut before = Vec::new();
+                traces(&payload, "", &mut before);
+                assert!(!before.is_empty(), "{form}/{key}: 예시에 작성자 신원이 없어 회귀를 못 잡는다");
+
+                inject_identity_deep(&mut payload, &id);
+
+                let mut after = Vec::new();
+                traces(&payload, "", &mut after);
+                assert!(
+                    after.is_empty(),
+                    "{form}/{key}: 주입 후에도 예시 작성자 신원이 {}곳 남았다 →\n  {}",
+                    after.len(),
+                    after.join("\n  ")
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 4, "양식 예시를 {checked}개만 훑었다 — 대상이 사라졌는지 확인할 것");
+    }
+
+    /// `groupByKey`("<empCd><날짜>")는 empCd를 접두사로 품은 조합 문자열이라
+    /// empCd만 갈아끼우면 옛 사번이 그대로 남는다.
+    #[test]
+    fn group_by_key의_사번_접두사도_교체된다() {
+        let mut v = json!({ "empCd": "11097", "groupByKey": "1109720260803" });
+        inject_identity(&mut v, &me());
+        assert_eq!(v["empCd"], "22222");
+        assert_eq!(v["groupByKey"], "2222220260803", "접두사 사번이 바뀌어야 한다");
+
+        // 형식이 다르면(접두사가 옛 사번이 아니면) 건드리지 않는다 — 함부로 자르지 않는다.
+        let mut other = json!({ "empCd": "11097", "groupByKey": "XX-20260803" });
+        inject_identity(&mut other, &me());
+        assert_eq!(other["groupByKey"], "XX-20260803");
     }
 
     #[test]

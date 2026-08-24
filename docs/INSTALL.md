@@ -13,6 +13,11 @@
 지원 바이너리: **macOS(Apple Silicon)**, **Linux x86_64 / aarch64**, **Windows x86_64**.
 > Intel 맥용 바이너리는 제공하지 않습니다(필요하면 [소스 빌드](#부록-소스-빌드)).
 
+> **(Linux) `libsecret-tools`가 필요합니다.** Chrome 쿠키를 GNOME Keyring/KWallet에서
+> 자동 복호화하려면 `secret-tool`이 있어야 합니다. 없으면 미리 설치하세요:
+> `sudo apt install libsecret-tools`(Debian/Ubuntu 계열, 데스크톱 세션에서 키링이
+> 잠금 해제돼 있어야 합니다). 자세한 내용은 [5. 크레덴셜이 안 잡힐 때](#5-크레덴셜이-안-잡힐-때-문제-해결) 참고.
+
 ---
 
 ## 1. 다운로드

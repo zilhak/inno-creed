@@ -60,10 +60,12 @@ mkdir -p ~/bin && mv inno-creed-linux-* ~/bin/inno-creed
 **Claude Code:**
 
 ```sh
-claude mcp add inno-creed -- /절대경로/inno-creed          # Windows: ...\inno-creed.exe
+claude mcp add inno-creed --scope user -- /절대경로/inno-creed          # Windows: ...\inno-creed.exe
 ```
 
-또는 설정 JSON에 직접:
+> ⚠️ **`--scope`를 꼭 지정하세요.** `claude mcp add`의 기본 스코프는 `local`이라, **등록한 그 디렉토리에서만** 도구가 보입니다. 다른 프로젝트 디렉토리에서 Claude Code를 열면 `inno-creed`가 목록에 없어 등록이 안 된 것처럼 보입니다(실제로는 다른 디렉토리 스코프에 걸려 있는 것). 여러 프로젝트에서 공통으로 쓰려면 위처럼 `--scope user`로 등록하세요. 특정 프로젝트에서만 쓰고 싶다면 그 프로젝트 디렉토리에서 `--scope project`를 쓰세요. 스코프는 `claude mcp list`로 확인할 수 있습니다.
+
+또는 설정 JSON에 직접(`~/.claude.json`의 최상위 `mcpServers`에 넣으면 user 스코프와 동일):
 
 ```json
 {

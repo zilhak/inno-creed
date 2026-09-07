@@ -55,13 +55,15 @@
 | 도구 | 기능 |
 |---|---|
 | `list_mailboxes` / `list_mail_inbox` | 메일함 목록 / 받은메일 |
-| `read_mail` | 메일 1건 본문(평문)·헤더·첨부목록 — 외부 이미지 자동로드 안 함 |
+| `read_mail` | 메일 1건 본문(평문)·헤더·첨부목록 — 외부 이미지 자동로드 안 함 · ⚠️ **읽음 처리됨**(`mark_mail_unread`로 되돌림) |
 | `send_mail` | 메일 발송(첨부 지원, 받는사람 미지정 시 본인에게) |
 | `save_mail_draft` | 임시보관함에 저장만(발송 안 함, 첨부 지원) |
 | `list_mail_drafts` | 임시보관함 조회 — 저장한 초안 확인, 항목의 `muid`가 후속 조회 키 |
 | `send_mail_from_draft` | 임시보관 초안을 발송(첨부 승계 포함) — ⚠️ 실제 발송, 성공 시 원본 삭제. 실재 확인이 최근 20건만 훑는다 |
 | `delete_mail` | 메일 삭제(휴지통 이동) |
 | `download_mail_attachment` | 첨부파일 저장(실행 없이 저장만) |
+| `mark_mail_unread` | **읽지 않음으로 되돌리기** — `read_mail`이 세운 읽음 플래그 해제(반영은 재조회로 검증, 이미 미읽음이면 `already`) |
+| `mailbox_counts` | 메일함별 미읽음·전체 + 계정 집계(`unreadCount`·`toMeCount`·`flaggedCount`·`attachCount`) |
 
 **게시판**
 | 도구 | 기능 |
@@ -273,7 +275,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
  ├─ client   세션 lazy 취득(10분 TTL 캐시) · 헤더 주입 · POST · 응답 파싱
  ├─ modules  자원 · 일정 · 메일 · 게시판 · 전자결재 · 근태 · 조직
  │           API 래퍼 + 파생 조회 + 소유권 가드 · read-back 검증
- └─ mcp      rmcp stdio 서버 — tools/(도구 53개, 도메인별) · args/(인자 스키마) · 에러 변환
+ └─ mcp      rmcp stdio 서버 — tools/(도구 55개, 도메인별) · args/(인자 스키마) · 에러 변환
 ```
 
 크레덴셜만 브라우저에서 빌려오고, 실행은 전부 순수 HTTP입니다. 서명·세션 규격은 [architecture.md](docs/architecture.md)에 정리돼 있습니다.
@@ -282,7 +284,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
 
 - **응답 성공 ≠ 실제 반영** — 서버는 권한 밖 대상에 대해 `successTf:true`를 주면서 실제로는 무시(silent no-op)합니다. 그래서 모든 mutation은 직후 **재조회(read-back)로 실제 상태를 확인**하고, 반영되지 않았으면 실패로 처리합니다.
 - **소유권 가드** — 쓰기 도구는 대상의 소유자(예약은 `empSeq`, 일정은 `createSeq`)가 본인일 때만 실행하고, 아니면 명시적 에러를 냅니다. 서버도 남의 데이터 수정을 무시하지만, MCP에서 먼저 걸러 원인을 분명히 알려줍니다. 이 두 규약은 도구 층이 아니라 **각 도메인 모듈의 mutation 함수(`*_and_verify`) 안**에 있어 어떤 호출자도 우회할 수 없습니다.
-- **부작용 있는 도구는 명시** — 근태 punch(`attendance_clock_in`/`attendance_clock_out`), 상신(`submit_approval`), 게시글 열람(`read_notice`, 조회수 증가)은 실제 기록이 남습니다. 사용자가 명시적으로 지시할 때만 호출하세요. 메일 발송은 되돌릴 수 없어 한 단계 더 두었습니다 — 지시받았더라도 `save_mail_draft`로 초안을 만들어 `list_mail_drafts`로 확인받은 뒤 `send_mail_from_draft`로 **그 초안을 그대로** 보냅니다(확인받은 형상과 발송물이 어긋나지 않고, 원본 초안 정리까지 그 도구가 합니다). 사용자가 즉시 발송을 지시하면 그때만 `send_mail`로 곧바로 보냅니다.
+- **부작용 있는 도구는 명시** — 근태 punch(`attendance_clock_in`/`attendance_clock_out`), 상신(`submit_approval`), 게시글 열람(`read_notice`, 조회수 증가), 메일 열람(`read_mail`, 읽음 처리 — `mark_mail_unread`로 되돌림)은 실제 기록이 남습니다. 사용자가 명시적으로 지시할 때만 호출하세요. 메일 발송은 되돌릴 수 없어 한 단계 더 두었습니다 — 지시받았더라도 `save_mail_draft`로 초안을 만들어 `list_mail_drafts`로 확인받은 뒤 `send_mail_from_draft`로 **그 초안을 그대로** 보냅니다(확인받은 형상과 발송물이 어긋나지 않고, 원본 초안 정리까지 그 도구가 합니다). 사용자가 즉시 발송을 지시하면 그때만 `send_mail`로 곧바로 보냅니다.
 - **서버 자동 결재선 불신** — 서버가 채워주는 기본 결재선은 위임전결 규정과 일치하지 않습니다. `get_approval_line_schema`로 직책 기반 스키마를 받고, `org_chart`로 담당자를 해석한 뒤 사람이 확인하고 상신하세요.
 
 ## 문서

@@ -772,6 +772,13 @@ def body(mcp: Mcp, fx: dict, marker: str):
     run(mcp, "list_mailboxes", lambda d: (
         isinstance(d, (list, dict)) and len(d) > 0, f"메일함 {len(d)}개 항목"))
     inbox = run(mcp, "list_mail_inbox", lambda d: (isinstance(d["Records"], list), f"{len(d['Records'])}통"))
+    run(mcp, "mailbox_counts", lambda d: (
+        isinstance(d, list) and len(d) > 1 and "unreadCount" in d[-1],
+        f"메일함 {len(d) - 1}개 + 집계(unread {d[-1].get('unreadCount')}, toMe {d[-1].get('toMeCount')})"))
+    # mark_mail_unread 는 **쓰기**다. 이 하네스의 불변식은 "우리가 만든 것에만 쓴다"이므로
+    # 대상이 마커 붙은 자기발송 메일이어야 한다 — 그 자리는 draft_send_scenario 인데 거기서
+    # muid 를 밖으로 내지 않아 아직 엮지 못했다. 조용히 빼지 않고 SKIP 으로 남긴다.
+    skip("mark_mail_unread", "쓰기 도구 — 마커 메일에 엮는 작업 미완(draft_send_scenario 에 붙일 것)")
     notices = run(mcp, "list_notices", lambda d: (
         len(d["articles"]) > 0, f"{len(d['articles'])}건/전체 {d['totalCnt']}"), page_size=5)
 

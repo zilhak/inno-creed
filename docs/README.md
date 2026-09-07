@@ -9,7 +9,7 @@ inno-creed의 기술 문서. 프로젝트 소개·도구 목록은 [루트 READM
 | [architecture.md](architecture.md) | 브라우저가 필요 없는 이유, 모듈 구조, 크레덴셜 취득(Chrome/Firefox 쿠키 복호화), authToken·세션 정보, `wehago-sign` 서명 규격, 응답 봉투, 안전 규약(read-back·소유권 가드) |
 | [api-reference.md](api-reference.md) | 모듈별 확정 API 스키마 — 자원(회의실)·일정·메일·게시판·전자결재·근태·조직도의 엔드포인트, 요청/응답 필드, 실측으로 확인한 함정 |
 | [HTTP.md](HTTP.md) | HTTP 전송을 정식 지원하지 않는 이유(크레덴셜=서버 머신 소유자, 되돌릴 수 없는 쓰기 도구, 서버 기준 파일 경로)와, 로컬 한정으로 꼭 필요할 때 직접 빌드하는 절차 |
-| [../tests/live/README.md](../tests/live/README.md) | 라이브 스모크 테스트 — 실제 아마란스에 붙어 도구 53개를 왕복시키는 하네스의 안전장치(CI 차단·마커 기반 삭제 가드·잔여물 대장)와 실행법 |
+| [../tests/live/README.md](../tests/live/README.md) | 라이브 스모크 테스트 — 실제 아마란스에 붙어 도구 55개를 왕복시키는 하네스의 안전장치(CI 차단·마커 기반 삭제 가드·잔여물 대장)와 실행법 |
 
 ## 이 문서들의 원칙
 

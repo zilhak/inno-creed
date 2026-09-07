@@ -101,6 +101,15 @@ pub struct ReadMailArgs {
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
+pub struct MarkMailUnreadArgs {
+    /// 읽지 않음으로 되돌릴 메일 muid. list_mail_inbox 결과의 muid 사용.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
+    pub muid: String,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct DownloadMailAttachmentArgs {
     /// 메일 muid. read_mail/list_mail_inbox의 muid.
     #[serde(deserialize_with = "super::flex_string")]

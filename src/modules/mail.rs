@@ -97,6 +97,108 @@ fn has_muid(list: &Value, muid: &str) -> bool {
         .is_some_and(|rows| rows.iter().any(|m| json_str(m.get("muid")) == muid))
 }
 
+/// 해석 불가를 읽음으로 접으면 성공한 쓰기를 실패로 보고하므로 별도 상태로 둔다.
+#[derive(Debug, PartialEq, Eq)]
+enum SeenState {
+    Unseen,
+    Seen,
+    Unknown,
+}
+
+/// 대상의 읽음 상태. 목록에서 찾지 못하면 `None`, 대상의 `seen`만 해석 불가면 `Unknown`.
+/// API가 숫자·문자열·불리언을 혼용하므로 `json_str`로 흡수한다.
+fn seen_flag(list: &Value, muid: &str) -> Option<SeenState> {
+    list.get("Records")?
+        .as_array()?
+        .iter()
+        .find(|m| json_str(m.get("muid")) == muid)
+        .map(|m| match json_str(m.get("seen")).as_str() {
+            "0" | "false" => SeenState::Unseen,
+            "1" | "true" => SeenState::Seen,
+            _ => SeenState::Unknown,
+        })
+}
+
+/// `mark_unread_and_verify`가 대상을 확인하는 목록 창(최근 N건).
+/// 도구 기본값 20보다 넉넉히 잡되 전량 조회는 하지 않는다 — 받은메일함이 만 단위인 계정이 있다.
+const UNREAD_WINDOW: i64 = 200;
+
+/// 메일함별 미읽음·전체 카운트 — `mail000A03`(body `{}`). **조회 전용, 부작용 없음**(실증 2026-08-31).
+///
+/// `list_mailboxes`(`mail000A01`)와 겹치지만 그쪽에 없는 **계정 전체 집계**가 배열 마지막 항목으로
+/// 온다: `unreadCount`·`toMeCount`(나에게 온 것)·`flaggedCount`·`attachCount`·`totalCount`.
+pub async fn mailbox_counts(c: &GwClient) -> Result<Value> {
+    c.call("/mail/mail000A03", &json!({})).await
+}
+
+/// 받은메일 1건을 **읽지 않음으로 되돌린다** — `mail002A15` + read-back 검증.
+///
+/// **왜 필요한가**: `read_mail`(`mail002A01`)은 서버측 `seen` 플래그를 세운다(실증). 에이전트가
+/// 대신 읽어버리면 사람이 "안 읽은 메일"로 다시 만날 방법이 없어진다. 그 되돌림이 이 함수다.
+///
+/// ⚠️ **`type`은 `"unseen"`으로 고정한다.** `mail002A15`는 범용 플래그 변경 API다(`uids` 복수형 +
+/// `type` 판별자). `"seen"`·`"flagged"` 같은 다른 값은 **관측된 적이 없어** 무엇을 하는지 모른다 —
+/// 관측되지 않은 상태에 콜을 쏘지 않는다(`docs/architecture.md` §7.2).
+///
+/// ⚠️ **응답으로는 아무것도 알 수 없다** — `{"code":"0","msg":"SUCCESS"}`만 오고 uid별 결과가 없다.
+/// 그래서 판정은 전부 목록 재조회가 한다(§7.1 3분법):
+///
+/// | 재조회 | 결말 |
+/// |---|---|
+/// | 있고 `seen=0` | 반영됨 → `ok:true` |
+/// | 있고 `seen=1` | 반영 안 됨 → 실패(`Err`) |
+/// | 창 안에 없거나 `seen` 해석 불가 | **모르는 것** → `ok:false` + "실행은 됐으나 확인 못 함" |
+///
+/// 이미 미읽음이면 **실행하지 않고** `already:true`로 끝낸다(`attendance::punch_and_verify`와 같은 규약).
+pub async fn mark_unread_and_verify(c: &GwClient, muid: &str) -> Result<Value> {
+    if muid.trim().is_empty() {
+        return Err(InvalidInput("muid가 비어 있다".into()).into());
+    }
+    let seq = mbox_seq(c, INBOX).await?;
+
+    // 사전 확인 — 창 안에 있는지, 이미 미읽음인지. 여기서 끝나면 콜을 쏘지 않는다.
+    let before = list_mails(c, seq, 1, UNREAD_WINDOW).await?;
+    match seen_flag(&before, muid) {
+        Some(SeenState::Unseen) => {
+            return Ok(json!({
+                "ok": true, "already": true, "muid": muid, "verifiedByReadback": true,
+                "note": "이미 읽지 않음 상태 — 서버에 아무것도 보내지 않았다"
+            }));
+        }
+        // 대상이 있으면 상태 미상이어도 실행한다 — 이미 미읽음으로 오판해 건너뛰지 않는다.
+        Some(SeenState::Seen | SeenState::Unknown) => {}
+        // 창 밖일 수도, 정말 없을 수도 있다. 어느 쪽인지 모르는 채로 쏘지 않는다.
+        None => {
+            return Err(InvalidInput(format!(
+                "받은메일함 최근 {UNREAD_WINDOW}건에서 muid={muid} 를 찾지 못했다 — 그보다 오래된 메일이거나 존재하지 않는다. list_mail_inbox로 확인할 것."
+            ))
+            .into());
+        }
+    }
+
+    c.call(
+        "/mail/mail002A15",
+        &json!({ "mbox": INBOX, "uids": muid, "type": "unseen" }),
+    )
+    .await?;
+
+    let after = list_mails(c, seq, 1, UNREAD_WINDOW).await?;
+    match seen_flag(&after, muid) {
+        Some(SeenState::Unseen) => Ok(json!({
+            "ok": true, "already": false, "muid": muid, "verifiedByReadback": true
+        })),
+        Some(SeenState::Seen) => bail!("읽지 않음 처리가 반영되지 않았다(muid={muid}) — 재조회 결과가 여전히 읽음이다"),
+        Some(SeenState::Unknown) => Ok(json!({
+            "ok": false, "muid": muid, "verifiedByReadback": false,
+            "note": "실행은 됐으나 재조회의 seen 값을 해석할 수 없어 반영을 확인하지 못했다"
+        })),
+        None => Ok(json!({
+            "ok": false, "muid": muid, "verifiedByReadback": false,
+            "note": "실행은 됐으나 재조회에서 대상을 찾지 못해 반영을 확인하지 못했다"
+        })),
+    }
+}
+
 /// 작성폼 초기화 — `mail014A01`. 발송(A04)·임시저장(A14)에 필요한 `sessionKey`/`fileDir`을
 /// 확보하기 위해 선행 호출. 응답에는 재저장 때 되돌려줘야 하는 `mailkey`도 들어 있다.
 /// ⚠️ `mailKind`는 **`"plain"`**(= 브라우저의 `메일쓰기`)이다.
@@ -1349,6 +1451,39 @@ pub async fn delete_mails(c: &GwClient, uids: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 타입이 달라도 같은 상태로 판정해야 사전 확인과 사후 검증이 어긋나지 않는다.
+    #[test]
+    fn seen_flag는_숫자_문자열_불리언을_모두_흡수한다() {
+        for seen in [json!(0), json!("0"), json!(false), json!("false")] {
+            let list = json!({ "Records": [{ "muid": 1, "seen": seen }] });
+            assert_eq!(seen_flag(&list, "1"), Some(SeenState::Unseen), "seen={seen}");
+        }
+        for seen in [json!(1), json!("1"), json!(true), json!("true")] {
+            let list = json!({ "Records": [{ "muid": "1", "seen": seen }] });
+            assert_eq!(seen_flag(&list, "1"), Some(SeenState::Seen), "seen={seen}");
+        }
+    }
+
+    /// 필드 해석 불가와 대상 부재를 구분하고, 어느 쪽도 읽음·미읽음으로 단정하지 않는다.
+    #[test]
+    fn seen_flag는_모름을_읽음과_구분한다() {
+        let list = json!({ "Records": [
+            { "muid": 1 },
+            { "muid": 2, "seen": null },
+            { "muid": 3, "seen": "yes" },
+            { "muid": 4, "seen": 2 },
+            { "muid": 5, "seen": [] },
+            { "muid": 6, "seen": {} },
+        ]});
+        for muid in ["1", "2", "3", "4", "5", "6"] {
+            assert_eq!(seen_flag(&list, muid), Some(SeenState::Unknown), "muid={muid}");
+        }
+        assert_eq!(seen_flag(&list, "99"), None, "창 밖은 None — 상태 미상과 구분된다");
+        assert_eq!(seen_flag(&json!({}), "1"), None);
+        assert_eq!(seen_flag(&json!({ "Records": null }), "1"), None);
+        assert_eq!(seen_flag(&json!({ "Records": {} }), "1"), None);
+    }
 
     fn sample_init() -> Value {
         json!({

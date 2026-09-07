@@ -121,7 +121,7 @@ impl ServerHandler for Amaranth {
              \n\
              주의:\n\
              - 부작용 있는 도구 — `attendance_clock_in`/`attendance_clock_out`(실제 근태 기록), `submit_approval`(결재요청 발송), \
-               `send_mail`, `read_notice`(조회수 증가). 사용자가 명시적으로 지시할 때만 호출한다.\n\
+               `send_mail`, `read_notice`(조회수 증가), `read_mail`(읽음 처리 — 받은메일함 최근 200건 이내면 `mark_mail_unread`로 되돌릴 수 있다). 사용자가 명시적으로 지시할 때만 호출한다.\n\
              - **메일 발송은 되돌릴 수 없다** — 지시받았더라도 곧바로 `send_mail` 하지 말고, \
                `save_mail_draft`로 초안을 만들어 `list_mail_drafts`로 사용자 확인을 받은 뒤 \
                `send_mail_from_draft`로 **그 초안을 그대로** 보낸다(원본 초안 정리까지 그 도구가 한다). \
@@ -157,6 +157,7 @@ mod tests {
         "list_approval_lines", "list_approval_submission_guides", "list_approvals",
         "list_calendars", "list_events", "list_mail_drafts", "list_mail_inbox", "list_mailboxes",
         "list_notice_attachments", "list_notices", "list_reservations", "list_resources",
+        "mailbox_counts", "mark_mail_unread",
         "my_reservations", "org_chart", "pending_approvals", "person_group", "read_approval",
         "read_approval_line", "read_mail", "read_notice", "reserve_resource", "save_approval_line", "save_mail_draft",
         "save_person_group", "search", "send_mail", "send_mail_from_draft", "submit_approval",

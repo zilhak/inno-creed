@@ -246,12 +246,43 @@
 | `mail014A08` → `/ecm/ecm001A03` | 첨부 다운로드(2단계) | `download_mail_attachment` |
 | `mail014A08` | 초안 첨부 승계(`fileSn` → 발송용 `fileId`) | `send_mail_from_draft` |
 | `mail002A05` | 메일 삭제(휴지통) | `delete_mails` |
+| `mail000A03` | 메일함별 미읽음·전체 카운트 + 계정 전체 집계 | `mailbox_counts` |
+| `mail002A15` | 메일 플래그 변경(`type:"unseen"` = 읽지 않음으로) | `mark_mail_unread` |
 
 - 특이점: 메일 API는 body에 **`mainApiCode`**(예 `"mail003A01"`)를 명시해 라우팅(다른 모듈은 URL만). 메일 식별자 = `muid`.
 - ⚠️ **메일함 `mboxSeq`는 계정마다 다르다 — 코드에 박지 말고 `mail000A01`(`list_mailboxes`) 응답에서 이름으로 찾을 것**(`mbox_seq(c, "INBOX")`).
   아래는 **개발자 계정 한 곳의 실측값**일 뿐이다: INBOX `26986` / SENT `26989` / DRAFTS `26992` / TRASH `26995` / SPAM `26998`.
   이 값을 상수로 박았다가 다른 계정 전원이 받은메일함 조회에 실패한 적이 있다
   (`resultCode=-1 msg=not Box : <메일주소> -> boxSeq(26986)`, 2026-08-20 제보로 발견).
+
+### 읽음 플래그 (mail002A15 · mail000A03) — 실측 2026-08-31
+
+`read_mail`(`mail002A01`)은 **서버측 읽음 플래그를 세운다.** 실측: 호출 전 INBOX `unseen=1` → 호출 후 `unseen=0`.
+도구 설명에도 `instructions` 부작용 목록에도 이 사실이 없어서, 에이전트가 사용자의 미읽음 표시를
+조용히 지우는 일이 실제로 일어났다. 그래서 되돌림 API를 찾아 래퍼로 붙였다.
+
+**플래그 변경** — `POST /mail/mail002A15`
+
+```json
+{"mbox":"INBOX","uids":"<muid>","type":"unseen"}
+```
+
+- 응답: `resultCode:0` + `resultData: {"code":"0","msg":"SUCCESS"}` — **봉투 안에 또 봉투**.
+- ⚠️ **응답에 uid별 결과가 없다.** 성패와 무관하게 같은 모양이 오므로 반영 여부는 **목록 재조회로만** 알 수 있다(§7.1 3분법을 그대로 적용).
+- 도구는 **받은메일함 최근 200건** 안에서 대상을 확인한 뒤 실행한다. 이미 미읽음이면 실행 없이 `already:true`. `seen`의 숫자·문자열·불리언을 흡수하고, 재조회에서 값을 해석할 수 없으면 실패로 단정하지 않고 `ok:false`, `verifiedByReadback:false`로 확인 불가를 보고한다.
+- `uids`가 복수형이고 `type`이 판별자다 = **범용 플래그 변경 API**. `"unseen"` 외의 `type`(`seen`·`flagged` 등)은 **미관측**이라 래퍼가 열지 않는다(관측되지 않은 상태에 콜을 쏘지 않는다, §7.2).
+- 왕복 실증: `unseen 2→3`(해제, 대상 `seen 1→0`) → `read_mail`로 원복 → `2` 복귀.
+- **미검증**: `uids` 다건(콤마 구분) · `mbox`가 실제로 쓰이는지(`mail003A01`은 `boxName`을 무시한다).
+
+**카운트** — `POST /mail/mail000A03`, body `{}`. 조회 전용, 부작용 없음.
+
+- 응답 배열: 메일함마다 `{boxnameSeq, count(=미읽음), totalCount}`, **마지막 항목이 계정 전체 집계** — `unreadCount`·`toMeCount`(나에게 온 것)·`flaggedCount`·`attachCount`·`totalCount`.
+- `mail000A01`(`list_mailboxes`)에는 이 집계가 없다. 브라우저는 플래그 변경 직후 이것을 불러 화면 카운트를 갱신한다.
+- 메일함 **이름은 주지 않는다** — `boxnameSeq`뿐이라 이름이 필요하면 `mail000A01`과 맞춰야 한다.
+
+**이 두 API는 프론트엔드 번들에 없다.** 코어 번들 7.9MB(`main` 3.0MB + `6453` 4.8MB)와 lazy 청크
+490개를 전수 검색해도 `mailNNNAnn`·`/mail/`·`mainApiCode` 문자열이 **0건**이다 — 경로가 리터럴로
+존재하지 않는다. DevTools 네트워크 캡처만이 얻는 경로였다(§왜 브라우저가 캡처에 필요한가).
 
 ### 메일 목록 (mail003A01)
 
@@ -579,7 +610,9 @@ POST /mail/mail002A01   body(JSON): { uid: <muid> }
 - 도구는 본문을 **평문화**해서 반환(HTML은 `html_to_text`, plain 우선). ⚠️ **렌더링하지 않으므로 외부 이미지(추적 픽셀)를 자동 fetch하지 않음** — 외부 리소스가 있으면 `remoteResourceCount`로 개수만 경고. (보안: 열람 유출 방지)
 - 첨부는 메타데이터(name/ext/`fileSizeApprox`/fileSn/isImage)만 반환. `fileSn`은 **호출마다 바뀌는 세션 토큰** → read 직후 다운로드에 사용.
 - ⚠️ `fileList[].fileSize`는 원본 바이트가 아니라 **MIME 본문(base64+줄바꿈) 크기**라 실제보다 ~33% 큼 → 도구는 `fileSizeApprox`(≈ ×3/4)로 근사해 반환. **정확한 크기는 `download_mail_attachment`의 `bytes`**. (게시판 `ecm001A04`의 fileSize는 원본 그대로라 이 보정 불필요)
-- ⚠️ 조회수/읽음처리: UI는 별도 `mail002A15`(seen)를 호출한다. `mail002A01` 단독은 읽음 부작용이 없는 것으로 관측(미확정).
+- ⚠️ **읽음 처리된다 — `mail002A01` 단독으로 서버측 `seen` 플래그가 세워진다.** 실측 2026-08-31: 호출 전 INBOX `unseen=1` → 호출 후 `0`.
+  이전의 "부작용 없음(미확정)" 기록은 반증되어 정정한다. `mail002A15`의 `type:"seen"` 호출은 미관측이므로 기존 UI 호출 서술도 철회한다.
+  되돌림은 `mail002A15` `type:"unseen"` → 위 "읽음 플래그 (mail002A15 · mail000A03)" 절의 `mark_mail_unread`. **받은메일함 최근 200건 안의 메일만 가능**하므로 그 밖의 메일은 되돌림을 전제하고 열지 않는다.
 
 ### 메일 첨부 다운로드 (mail014A08 → ecm001A03) → `download_mail_attachment`
 

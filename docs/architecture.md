@@ -26,7 +26,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
  │           API 래퍼 + 파생 조회 + **소유권 가드 · read-back 검증**(`*_and_verify`)
  └─ mcp/     rmcp 서버(stdio)
     ├─ mod.rs   서버 골격: Amaranth · 라우터 합성(all_tools) · ensure_session · 에러 변환 · instructions
-    ├─ tools/   도구 53개 — 도메인 12개(resource·calendar·mail·board·approval{,_line,_submit,_meta}·org·person_group·attendance·search)
+    ├─ tools/   도구 55개 — 도메인 12개(resource·calendar·mail·board·approval{,_line,_submit,_meta}·org·person_group·attendance·search)
     └─ args/    도구 인자 스키마 — 도메인 9개. ⚠️ doc comment가 그대로 LLM 프롬프트가 된다
 ```
 

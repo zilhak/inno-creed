@@ -162,7 +162,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "메일 1건의 본문(평문)·헤더·첨부목록을 조회한다. 본문 HTML은 렌더링하지 않고 평문화(외부 이미지 자동로드 안 함, remoteResourceCount로 경고). 본문에 박힌 이미지 중 **이 서버가 가진 것**은 `inlineImages[]`로 나오고 `download_body_image`로 받아볼 수 있다(외부 호스트 이미지는 일부러 빼며, 그 개수가 remoteResourceCount다). 수신자는 to/cc/bcc로 낸다 — ⚠️ **받은 메일의 bcc는 대개 빈 값**이다(숨은참조는 수신자에게 보이지 않는 필드라 헤더에 남지 않는다). muid=list_mail_inbox의 muid."
+        description = "⚠️ **읽음 처리된다** — 서버측 읽음 플래그가 세워진다(실증). 사용자가 아직 안 읽은 메일을 대신 열면 그 사람의 미읽음 표시가 사라진다. 되돌리려면 `mark_mail_unread` — ⚠️ **받은메일함 최근 200건 안의 메일만 되돌릴 수 있다**(그 밖이면 거절되므로 되돌림을 전제하고 열지 말 것). 메일 1건의 본문(평문)·헤더·첨부목록을 조회한다. 본문 HTML은 렌더링하지 않고 평문화(외부 이미지 자동로드 안 함, remoteResourceCount로 경고). 본문에 박힌 이미지 중 **이 서버가 가진 것**은 `inlineImages[]`로 나오고 `download_body_image`로 받아볼 수 있다(외부 호스트 이미지는 일부러 빼며, 그 개수가 remoteResourceCount다). 수신자는 to/cc/bcc로 낸다 — ⚠️ **받은 메일의 bcc는 대개 빈 값**이다(숨은참조는 수신자에게 보이지 않는 필드라 헤더에 남지 않는다). muid=list_mail_inbox의 muid."
     )]
     async fn read_mail(
         &self,
@@ -171,6 +171,31 @@ impl Amaranth {
         let data = modules::mail::read_mail(&self.client, &a.muid)
             .await
             .map_err(map_domain_err_ctx("메일 조회 실패"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "받은메일 1건을 **읽지 않음으로 되돌린다**(mail002A15). `read_mail`이 서버측 읽음 플래그를 세우므로, 대신 읽어준 메일을 사용자가 다시 '안 읽은 메일'로 만나게 하려면 이것을 쓴다. 반영 여부는 목록 재조회로 검증해 `verifiedByReadback`으로 보고한다 — 서버 응답 자체는 성패를 구분하지 못한다. 이미 미읽음이면 서버에 아무것도 보내지 않고 `already:true`. ⚠️ 받은메일함 **최근 200건** 안의 메일만 대상이다(그보다 오래되면 대상을 확인할 수 없어 거절)."
+    )]
+    async fn mark_mail_unread(
+        &self,
+        Parameters(a): Parameters<MarkMailUnreadArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::mail::mark_unread_and_verify(&self.client, &a.muid)
+            .await
+            .map_err(map_domain_err_ctx("읽지 않음 처리 실패"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "메일함별 미읽음·전체 개수와 계정 전체 집계를 조회한다(mail000A03, 부작용 없음). `list_mailboxes`에 없는 집계를 함께 준다 — 응답 배열의 각 항목은 boxnameSeq/count(=미읽음)/totalCount이고 **마지막 항목이 계정 전체 집계**(unreadCount·toMeCount=나에게 온 메일·flaggedCount·attachCount·totalCount)다. 메일함 이름은 주지 않으므로 이름이 필요하면 `list_mailboxes`의 mboxSeq와 맞춰볼 것."
+    )]
+    async fn mailbox_counts(&self) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::mail::mailbox_counts(&self.client)
+            .await
+            .map_err(map_domain_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 

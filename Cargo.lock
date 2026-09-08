@@ -2088,7 +2088,7 @@ dependencies = [
 
 [[package]]
 name = "inno-creed"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "aes",
  "aes-gcm",

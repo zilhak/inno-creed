@@ -60,6 +60,7 @@ FORBIDDEN = {
     "attendance_clock_in": "실제 근태 punch — 되돌릴 수 없다",
     "attendance_clock_out": "실제 근태 punch — 되돌릴 수 없다",
     "delete_temp_approval": "임시보관 문서 삭제 — 사용자의 진짜 초안을 지울 수 있다",
+    "cancel_attendance_application": "기존 근태에 취소신청을 새로 상신하므로 자동 점검에서 제외",
 }
 
 # 상신 시나리오는 별도 opt-in(`INNO_CREED_LIVE_SUBMIT=1`)일 때만 열린다.
@@ -1145,8 +1146,12 @@ def draft_send_scenario(mcp: Mcp, marker: str):
     sent_at = datetime.now()
     subj = f"{marker} 초안발송 점검 {sent_at.strftime('%Y%m%d-%H%M%S')}"
 
-    sd = mcp.call("save_mail_draft", subject=subj,
-                  body="inno-creed 라이브 점검(초안 발송). 자동 삭제됩니다.")
+    # 서식 있는 원문은 파일 경로만 넘긴다. 표·색상·링크가 미리보기에서도 남는지 검사한다.
+    source = '<p style="color:#b00020">inno-creed 라이브 점검(초안 발송).</p><table><tr><td colspan="2">aassddff rich body</td></tr></table><a href="https://example.com/">링크</a>'
+    source_path = os.path.join(OUTDIR, "aassddff-rich.html")
+    with open(source_path, "w", encoding="utf-8") as output:
+        output.write(source)
+    sd = mcp.call("save_mail_draft", subject=subj, html_file=source_path)
     if sd[0] == "ERR" or not (sd[1] or {}).get("draft_muid"):
         skip("send_mail_from_draft", f"발송할 초안을 만들지 못함: {sd[1] if sd[0] == 'ERR' else 'draft_muid 없음'}")
         return
@@ -1154,6 +1159,14 @@ def draft_send_scenario(mcp: Mcp, marker: str):
     # 발송 전까지는 초안이 잔여물이다 — 발송이 실패해도 대장에 남아 다음 실행이 청소한다.
     dl = track("mail_draft", {"muid": muid, "subject": subj, "beforeExists": base_drafts},
                f"메일 임시보관함에서 제목 '{subj}' 삭제")
+
+    def chk_preview(d):
+        html = d.get("body_html", "")
+        preserved = all(part in html for part in ('color:#b00020', 'colspan="2"', 'https://example.com/', 'aassddff rich body'))
+        return (d.get("sent") is False and str(d.get("draft_muid")) == muid
+                and d.get("ready_for_send") is True and preserved,
+                "발송 없이 원본 서식·링크·본문 미리보기")
+    run(mcp, "preview_mail_draft", chk_preview, draft_muid=muid)
 
     def chk_send(d, _muid=muid, _bd=base_drafts, _bs=base_sent, _subj=subj):
         after = mailbox_counts(mcp)  # read-back — 발송 응답만 믿지 않는다

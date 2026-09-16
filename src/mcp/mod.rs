@@ -128,7 +128,7 @@ impl ServerHandler for Amaranth {
                `send_mail`/`send_mail_from_draft`(발송), `read_notice`(조회수 증가), \
                `read_mail`(읽음 처리 — 받은메일함 최근 200건 이내면 `mark_mail_unread`로 되돌릴 수 있다). 사용자가 명시적으로 지시할 때만 호출한다.\n\
              - **메일 발송은 되돌릴 수 없다** — 지시받았더라도 곧바로 `send_mail` 하지 말고, \
-               `save_mail_draft`로 초안을 만들어 `list_mail_drafts`로 사용자 확인을 받은 뒤 \
+               `save_mail_draft`로 초안을 만들어 `preview_mail_draft`로 본문·수신자 확인을 받은 뒤 \
                `send_mail_from_draft`로 **그 초안을 그대로** 보낸다(원본 초안 정리까지 그 도구가 한다). \
                사용자가 '확인 없이 바로 보내'라고 명시하면 그때는 `send_mail`로 곧바로 발송한다.\n\
              - 회의실 **정원(수용인원) 데이터는 아마란스에 없다**. 'N명 회의실' 조건은 답할 수 없다.\n\
@@ -164,7 +164,7 @@ mod tests {
         "list_calendars", "list_events", "list_mail_drafts", "list_mail_inbox", "list_mailboxes",
         "list_notice_attachments", "list_notices", "list_reservations", "list_resources",
         "mailbox_counts", "mark_mail_unread",
-        "my_reservations", "org_chart", "pending_approvals", "person_group", "read_approval",
+        "my_reservations", "org_chart", "pending_approvals", "person_group", "preview_mail_draft", "read_approval",
         "read_approval_line", "read_mail", "read_notice", "reserve_resource", "save_approval_line", "save_mail_draft",
         "save_person_group", "search", "send_mail", "send_mail_from_draft", "submit_approval",
         "suggest_approval_line",
@@ -211,7 +211,9 @@ mod tests {
         for tool in ["send_mail", "save_mail_draft"] {
             for args in [
                 json!({"subject": "aassddff"}),
-                json!({"subject": "aassddff", "html": "<p>옛 인자</p>"}),
+                json!({"subject": "aassddff", "html": "   "}),
+                json!({"subject": "aassddff", "body": "본문", "html": "<p>중복</p>"}),
+                json!({"subject": "aassddff", "html_file": "relative.html"}),
                 json!({"subject": "aassddff", "body": "   "}),
                 json!({"subject": "aassddff", "body": "<p>직접 HTML</p>"}),
                 json!({"subject": "aassddff", "body": "본문", "boddy": "오타"}),
@@ -224,25 +226,30 @@ mod tests {
                     let value: Value = serde_json::from_str(&line).unwrap();
                     if value["id"] == 1 { break value; }
                 };
-                assert_eq!(response["result"]["isError"], true, "{tool}: {response}");
-                let text = response["result"]["content"][0]["text"].as_str().unwrap();
-                // 파싱 오류임을 확인한다. 세션/네트워크 오류로 우연히 실패한 경우는 통과하지 않는다.
-                assert!(text.contains("failed to deserialize parameters"), "{text}");
+                let text = if response["result"]["isError"] == true {
+                    response["result"]["content"][0]["text"].as_str().unwrap()
+                } else {
+                    assert_eq!(response["error"]["code"], -32602, "{response}");
+                    response["error"]["message"].as_str().unwrap()
+                };
+                // 인자 파싱 또는 본문 준비 단계에서 실패해야 한다. 세션 오류는 통과하지 않는다.
+                assert!(text.contains("failed to deserialize parameters") || text.contains("본문 입력 오류"), "{text}");
             }
         }
         server.abort();
     }
 
     #[test]
-    fn 메일_스키마는_body를_필수로_노출하고_html을_제거한다() {
+    fn 메일_스키마는_본문_입력_세_경로를_노출한다() {
         for tool in Amaranth::all_tools().list_all().iter().filter(|t| matches!(t.name.as_ref(), "send_mail" | "save_mail_draft")) {
             let schema = serde_json::to_value(&tool.input_schema).unwrap();
             assert_eq!(schema["additionalProperties"], false);
-            assert!(schema["required"].as_array().unwrap().contains(&serde_json::json!("body")));
-            assert!(schema["properties"].get("html").is_none());
+            assert!(!schema["required"].as_array().unwrap().contains(&serde_json::json!("body")));
+            assert!(schema["properties"].get("html").is_some());
+            assert!(schema["properties"].get("html_file").is_some());
             let args = serde_json::json!({"subject": "aassddff", "body": "본문"});
-            assert_eq!(serde_json::from_value::<args::mail::SendMailArgs>(args.clone()).unwrap().body, "본문");
-            assert_eq!(serde_json::from_value::<args::mail::SaveMailDraftArgs>(args).unwrap().body, "본문");
+            assert_eq!(serde_json::from_value::<args::mail::SendMailArgs>(args.clone()).unwrap().body.as_deref(), Some("본문"));
+            assert_eq!(serde_json::from_value::<args::mail::SaveMailDraftArgs>(args).unwrap().body.as_deref(), Some("본문"));
         }
     }
 }

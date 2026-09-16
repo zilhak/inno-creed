@@ -2,7 +2,7 @@
 
 `cargo test`(순수 함수 단위 테스트)와 도구 표면 스냅샷은 **"구조가 같다"**만 보장한다.
 실제 아마란스 API 왕복이 되는지는 증명하지 않는다. 이 스크립트가 그걸 증명한다 — 릴리즈된
-바이너리를 MCP 클라이언트로 직접 구동해 도구 58개 중 53개를 실호출한다(나머지는 금지 3개 · SKIP 1개 · 미커버 1개).
+바이너리를 MCP 클라이언트로 직접 구동해 도구 59개의 호출·제외 여부를 검사한다(실제 근태 변경 등 금지 4개 포함).
 
 ## ⚠️ 이건 진짜 데이터를 건드린다
 
@@ -51,7 +51,7 @@ INNO_CREED_LIVE=$(date +%Y%m%d) INNO_CREED_LIVE_SUBMIT=1 python3 tests/live/live
 
 ### ② 금지 도구 물리 차단
 
-`attendance_clock_in` · `attendance_clock_out` · `delete_temp_approval` 은 `Mcp.call()` 진입부에서 **예외를 던진다.**
+`attendance_clock_in` · `attendance_clock_out` · `delete_temp_approval` · `cancel_attendance_application` 은 `Mcp.call()` 진입부에서 **예외를 던진다.**
 주석으로 "쓰지 마세요"를 적어두는 것과 다르다 — 나중에 누가 실호출 코드를 추가해도 실행되지 않는다.
 `submit_approval`·`cancel_approval` 도 `INNO_CREED_LIVE_SUBMIT=1` 이 없으면 똑같이 차단된다.
 
@@ -133,3 +133,5 @@ fixtures 의 `expectedApprovers`/`expectedRefer`/`expectedOper` 와 다르면 **
 - `update_reservation` 은 서버가 **seqNum 을 재발급**한다. 대장 좌표도 함께 갱신하므로
   정리는 정상 동작하지만, 아마란스 화면에서 직접 찾을 땐 새 번호로 봐야 한다.
 - 상신 시나리오(opt-in)는 **결재선 사람들에게 알림을 남긴다.** 문서는 지워져도 알림은 안 지워진다.
+
+메일 회귀에는 `html_file` 저장과 `preview_mail_draft`의 본문·표·색상·링크 보존 확인이 포함됩니다.

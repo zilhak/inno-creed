@@ -26,7 +26,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
  │           API 래퍼 + 파생 조회 + **소유권 가드 · read-back 검증**(`*_and_verify`)
  └─ mcp/     rmcp 서버(stdio)
     ├─ mod.rs   서버 골격: Amaranth · 라우터 합성(all_tools) · ensure_session · 에러 변환 · instructions
-    ├─ tools/   도구 58개 — 도메인 12개(resource·calendar·mail·board·approval{,_line,_submit,_meta}·org·person_group·attendance·search)
+    ├─ tools/   도구 59개 — 도메인 12개(resource·calendar·mail·board·approval{,_line,_submit,_meta}·org·person_group·attendance·search)
     └─ args/    도구 인자 스키마 — 도메인 9개. ⚠️ doc comment가 그대로 LLM 프롬프트가 된다
 ```
 
@@ -241,14 +241,15 @@ read-back은 "반영됐는가"를 본다. 그런데 **반영은 됐지만 그 �
 
 상신(`submit_approval`)은 재조회 대신 응답의 docId 발급 여부로 판정한다(발급이 곧 접수).
 
-메일은 발송 전에 본문 보존을 검증한다. `save_mail_draft`는 필수 Markdown `body`를 HTML로
-변환하고 서명을 붙여 저장한 뒤, A01(draft) 재조회 결과의 본문 텍스트를 작성 본문과 비교한다.
-검증 실패/재조회 실패는 초안 ID를 포함한 오류이며 발송하지 않는다. `verified_by_readback:true`는
-목록 존재가 아니라 본문 텍스트 대조 성공을 뜻한다. 저장된 HTML의 해시를 계정·초안별 로컬 파일에
-남겨 프로세스 재시작 후에도 `send_mail_from_draft`가 같은 본문인지 대조한다. 기록이 없거나
-본문이 달라졌으면 발송을 중단한다. 웹/구버전 초안은 이 검증 기록이 없으므로 웹에서 보내거나
-새로 작성해야 한다. 직접 발송용 `send_mail`도 내부적으로 이 저장·검증·초안 발송 경로를 사용한다.
-본문 검증은 렌더링 결과 전체나 제목·수신자·첨부 변경을 고정하는 기능이 아니다.
+메일은 발송 전에 본문 보존을 검증한다. `save_mail_draft`는 `body`(텍스트·Markdown),
+`html_file`(HTML 파일), `html`(호환 원문) 중 하나만 받는다. 텍스트는 HTML로 변환하고,
+HTML은 서식을 유지한다. 저장 후 본문 텍스트를 재조회·대조하며 HTML 입력은 파싱한 구조도
+비교한다. 실패는 초안 ID를 포함한 무발송 오류다. `verified_by_readback:true`는 대조 성공을 뜻한다.
+계정·초안별 로컬 해시로 발송 시 같은 본문인지 다시 검사한다. 웹·구버전 초안은
+`preview_mail_draft`가 현재 내용과 원문 HTML을 반환하고 해시를 등록한다. 이 경로는 과거 원문과
+비교하는 검증이 아니라 현재 초안의 기준점을 만드는 것이므로 사용자 확인 후 발송해야 한다.
+직접 발송도 저장·검증·초안 발송을 거친다. 렌더링 결과 전체나 제목·수신자·첨부 변경 이력을
+고정하는 기능은 아니다.
 
 ### 7.2 소유권 가드
 

@@ -23,10 +23,18 @@ pub struct SendMailArgs {
     pub bcc: Option<String>,
     /// 제목
     pub subject: String,
-    /// 본문(필수). 일반 텍스트 또는 Markdown. HTML 태그는 사용하지 않는다.
-    /// HTML 변환·서명 삽입·저장 본문 검증은 도구가 처리한다.
-    #[serde(deserialize_with = "deserialize_body")]
-    pub body: String,
+    /// 간단한 본문: 일반 텍스트 또는 Markdown. body/html_file/html 중 정확히 하나를 지정한다.
+    /// 서식 있는 메일은 html_file 또는 기존 웹 초안의 preview_mail_draft를 우선 사용한다.
+    #[serde(default, deserialize_with = "deserialize_body")]
+    pub body: Option<String>,
+    /// 서식 있는 HTML 파일의 절대경로(UTF-8, MCP 서버가 실행되는 머신 기준).
+    /// Agent가 HTML을 다시 입력하지 않고 파일 내용을 그대로 사용한다. 상대경로 이미지 파일은 자동 첨부하지 않는다.
+    #[serde(default)]
+    pub html_file: Option<String>,
+    /// 기존 호출 호환용 HTML 원문. 가능하면 html_file 또는 웹 초안 ID를 사용한다.
+    /// body/html_file과 함께 지정하면 오류이며, 빈 본문은 허용하지 않는다.
+    #[serde(default)]
+    pub html: Option<String>,
     /// 첨부할 로컬 파일 경로 목록(선택, 절대경로). 비우면 첨부 없음.
     #[serde(default)]
     pub attachments: Vec<String>,
@@ -56,10 +64,18 @@ pub struct SaveMailDraftArgs {
     pub bcc: Option<String>,
     /// 제목. 비워두면 "(제목없음)"으로 저장된다.
     pub subject: String,
-    /// 본문(필수). 일반 텍스트 또는 Markdown. HTML 태그는 사용하지 않는다.
-    /// HTML 변환·서명 삽입·저장 본문 검증은 도구가 처리한다.
-    #[serde(deserialize_with = "deserialize_body")]
-    pub body: String,
+    /// 간단한 본문: 일반 텍스트 또는 Markdown. body/html_file/html 중 정확히 하나를 지정한다.
+    /// 서식 있는 메일은 html_file 또는 기존 웹 초안의 preview_mail_draft를 우선 사용한다.
+    #[serde(default, deserialize_with = "deserialize_body")]
+    pub body: Option<String>,
+    /// 서식 있는 HTML 파일의 절대경로(UTF-8, MCP 서버가 실행되는 머신 기준).
+    /// Agent가 HTML을 다시 입력하지 않고 파일 내용을 그대로 사용한다. 상대경로 이미지 파일은 자동 첨부하지 않는다.
+    #[serde(default)]
+    pub html_file: Option<String>,
+    /// 기존 호출 호환용 HTML 원문. 가능하면 html_file 또는 웹 초안 ID를 사용한다.
+    /// body/html_file과 함께 지정하면 오류이며, 빈 본문은 허용하지 않는다.
+    #[serde(default)]
+    pub html: Option<String>,
     /// 첨부할 로컬 파일 경로 목록(선택, 절대경로). 비우면 첨부 없음.
     #[serde(default)]
     pub attachments: Vec<String>,
@@ -84,6 +100,16 @@ pub struct SendMailFromDraftArgs {
     /// 초안에 수신자가 없으면 에러가 나므로 그때 지정할 것.
     #[serde(default)]
     pub to: Option<String>,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+pub struct PreviewMailDraftArgs {
+    /// 미리 볼 임시보관 초안의 muid. 웹·구버전 초안도 가능하다. 실제 발송하지 않는다.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
+    pub draft_muid: String,
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
@@ -130,8 +156,10 @@ pub struct DownloadMailAttachmentArgs {
 }
 
 // 파싱 단계에서 거부하므로 세션 확보·첨부 업로드·발송 모두 실행되지 않는다.
-fn deserialize_body<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    let body = String::deserialize(d)?;
-    crate::modules::mail::render_body(&body).map_err(serde::de::Error::custom)?;
+fn deserialize_body<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let body = Option::<String>::deserialize(d)?;
+    if let Some(body) = &body {
+        crate::modules::mail::render_body(body).map_err(serde::de::Error::custom)?;
+    }
     Ok(body)
 }

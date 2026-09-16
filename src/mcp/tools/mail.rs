@@ -37,7 +37,7 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
 
-    #[tool(description = "임시보관함(DRAFTS) 최근 20통을 조회한다 — save_mail_draft로 저장한 초안을 발송 전에 사용자에게 확인받는 경로다. 확인되면 그 항목의 muid를 send_mail_from_draft(draft_muid)에 넘겨 초안 그대로 발송한다. ⚠️ 응답은 서버 원본 봉투 그대로다 — 메일 배열은 `Records`(list_mail_inbox와 동일), 각 항목의 `muid`가 read_mail/delete_mail의 키다. 메일함 번호는 계정마다 달라 이름(DRAFTS)으로 해석한다. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\")).")]
+    #[tool(description = "임시보관함(DRAFTS) 최근 20통을 조회한다 — save_mail_draft로 저장한 초안을 발송 전에 사용자에게 확인받는 경로다. 그 항목의 muid로 preview_mail_draft를 호출해 본문·수신자를 확인받은 뒤 send_mail_from_draft(draft_muid)에 넘겨 초안 그대로 발송한다. ⚠️ 응답은 서버 원본 봉투 그대로다 — 메일 배열은 `Records`(list_mail_inbox와 동일), 각 항목의 `muid`가 read_mail/delete_mail의 키다. 메일함 번호는 계정마다 달라 이름(DRAFTS)으로 해석한다. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\")).")]
     async fn list_mail_drafts(&self) -> Result<CallToolResult, ErrorData> {
         self.ensure_session().await?;
         let data = modules::mail::list_drafts(&self.client, 1, 20)
@@ -47,12 +47,14 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "body에 일반 텍스트 또는 Markdown을 받아 내부적으로 초안 저장→본문 검증→발송한다. HTML 인자는 지원하지 않는다. 첨부 승계 제약은 send_mail_from_draft와 같다(콤마 파일명·동일 파일명·대용량 첨부 거부). 검증 실패 시 발송하지 않으며 오류의 draft_muid로 남은 초안을 확인할 수 있다. 받는사람 미지정 시 본인에게. **여러 명에게 보내려면 to에 콤마로 잇는다**(`\"홍길동 <hong@innogrid.com>,kim@innogrid.com\"` — 표시형과 순수 주소를 섞어도 된다). 참조는 cc, 숨은참조는 bcc에 같은 형식으로. attachments에 로컬 파일 경로를 주면 첨부 발송. ⚠️ 발송은 되돌릴 수 없다(수신자에게 나가면 회수 불가) — 곧바로 보내지 말고, 먼저 save_mail_draft로 보낼 형상을 임시보관함에 만들고 list_mail_drafts로 사용자에게 확인을 요청한 뒤, 확인받고 나서는 **이 도구가 아니라 send_mail_from_draft(draft_muid)로 그 초안을 그대로 발송한다**(확인받은 형상과 실제 발송물이 어긋날 여지가 없고, 원본 초안 정리도 그 도구가 한다). 이 도구는 **초안을 거치지 않는 직접 발송용**이다 — 사용자가 즉시 발송을 명시적으로 지시했거나, 본인 앞 메모·자동화처럼 사람 확인이 필요 없는 발송에 쓴다. 아마란스에 등록해 둔 **서명이 기본으로 본문 끝에 붙는다**(웹에서 보낸 것과 같은 형상) — 붙지 않아야 하면 `signature:false`. 응답의 `signature_attached`가 실제로 붙었는지를 알려준다(서명 미등록 계정은 켜 두어도 false)."
+        description = "body(텍스트/Markdown), html_file(HTML 파일), html(기존 호환) 중 하나를 받아 내부적으로 초안 저장→본문 검증→발송한다. HTML을 다시 입력하지 않도록 html_file 또는 웹 초안 경로를 우선 사용한다. 첨부 승계 제약은 send_mail_from_draft와 같다(콤마 파일명·동일 파일명·대용량 첨부 거부). 검증 실패 시 발송하지 않으며 오류의 draft_muid로 남은 초안을 확인할 수 있다. 받는사람 미지정 시 본인에게. **여러 명에게 보내려면 to에 콤마로 잇는다**(`\"홍길동 <hong@innogrid.com>,kim@innogrid.com\"` — 표시형과 순수 주소를 섞어도 된다). 참조는 cc, 숨은참조는 bcc에 같은 형식으로. attachments에 로컬 파일 경로를 주면 첨부 발송. ⚠️ 발송은 되돌릴 수 없다(수신자에게 나가면 회수 불가) — 곧바로 보내지 말고, 먼저 save_mail_draft로 보낼 형상을 임시보관함에 만들고 preview_mail_draft로 본문·수신자를 보여 주고 사용자에게 확인을 요청한 뒤, 확인받고 나서는 **이 도구가 아니라 send_mail_from_draft(draft_muid)로 그 초안을 그대로 발송한다**(확인받은 형상과 실제 발송물이 어긋날 여지가 없고, 원본 초안 정리도 그 도구가 한다). 이 도구는 **사람의 초안 확인을 생략하는 즉시 발송용**이다 — 사용자가 즉시 발송을 명시적으로 지시했거나, 본인 앞 메모·자동화처럼 사람 확인이 필요 없는 발송에 쓴다. 아마란스에 등록해 둔 **서명이 기본으로 본문 끝에 붙는다**(웹에서 보낸 것과 같은 형상) — 붙지 않아야 하면 `signature:false`. 응답의 `signature_attached`가 실제로 붙었는지를 알려준다(서명 미등록 계정은 켜 두어도 false)."
     )]
     async fn send_mail(
         &self,
         Parameters(a): Parameters<SendMailArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let body = modules::mail::prepare_body(a.body.as_deref(), a.html_file.as_deref(), a.html.as_deref())
+            .map_err(map_domain_err_ctx("본문 입력 오류 — 발송하지 않았습니다"))?;
         self.ensure_session().await?;
         let to = recipient_or_self(&self.client, &a.to);
         let cc = a.cc.as_deref().unwrap_or("");
@@ -63,7 +65,7 @@ impl Amaranth {
             cc,
             bcc,
             &a.subject,
-            &a.body,
+            &body,
             &a.attachments,
             a.signature,
         )
@@ -73,12 +75,14 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "body에 일반 텍스트 또는 Markdown을 받아 HTML로 변환하고 저장 본문을 검증한다. HTML 인자는 지원하지 않는다. 검증 실패는 오류이며 발송하지 않는다. 메일을 임시보관함(DRAFTS)에 저장한다 — **발송하지 않는다**(수신자에게 아무것도 가지 않는다). 발송 전 사람 확인을 받는 표준 경로라 send_mail보다 이 도구를 먼저 쓴다 — 초안을 만들고 list_mail_drafts로 사용자에게 확인받은 뒤, 확인되면 **send_mail_from_draft(draft_muid)로 그 초안을 그대로 발송**하거나 사용자가 아마란스 웹에서 직접 보낸다. 다만 사용자가 즉시 발송을 명시적으로 지시했다면 초안을 거치지 말고 곧바로 send_mail을 쓴다. 받는사람 미지정 시 본인. **여러 명이면 to에 콤마로 잇는다**; 참조는 cc, 숨은참조는 bcc에 같은 형식으로 — **여기 넣은 참조는 send_mail_from_draft가 그대로 승계해 발송한다.** attachments에 로컬 파일 경로를 주면 첨부까지 붙여 저장. 반환 draft_muid = 저장된 임시보관 메일의 muid. 아마란스에 등록해 둔 **서명이 기본으로 본문 끝에 붙어 저장된다**(웹에서 보낸 것과 같은 형상. send_mail_from_draft가 본문째로 승계하므로 두 번 붙지 않는다) — 붙지 않아야 하면 `signature:false`. 응답의 `signature_attached`가 실제로 붙었는지를 알려준다(서명 미등록 계정은 켜 두어도 false). ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\"))."
+        description = "body(텍스트/Markdown), html_file(HTML 파일), html(기존 호환) 중 하나를 받아 저장 본문을 검증한다. 서식 있는 본문은 html_file 또는 웹 초안의 preview_mail_draft를 우선 사용한다. 검증 실패는 오류이며 발송하지 않는다. 메일을 임시보관함(DRAFTS)에 저장한다 — **발송하지 않는다**(수신자에게 아무것도 가지 않는다). 발송 전 사람 확인을 받는 표준 경로라 send_mail보다 이 도구를 먼저 쓴다 — 초안을 만들고 preview_mail_draft로 본문·수신자를 보여 주고 사용자에게 확인받은 뒤, 확인되면 **send_mail_from_draft(draft_muid)로 그 초안을 그대로 발송**하거나 사용자가 아마란스 웹에서 직접 보낸다. 다만 사용자가 즉시 발송을 명시적으로 지시했다면 초안을 거치지 말고 곧바로 send_mail을 쓴다. 받는사람 미지정 시 본인. **여러 명이면 to에 콤마로 잇는다**; 참조는 cc, 숨은참조는 bcc에 같은 형식으로 — **여기 넣은 참조는 send_mail_from_draft가 그대로 승계해 발송한다.** attachments에 로컬 파일 경로를 주면 첨부까지 붙여 저장. 반환 draft_muid = 저장된 임시보관 메일의 muid. 아마란스에 등록해 둔 **서명이 기본으로 본문 끝에 붙어 저장된다**(웹에서 보낸 것과 같은 형상. send_mail_from_draft가 본문째로 승계하므로 두 번 붙지 않는다) — 붙지 않아야 하면 `signature:false`. 응답의 `signature_attached`가 실제로 붙었는지를 알려준다(서명 미등록 계정은 켜 두어도 false). ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\"))."
     )]
     async fn save_mail_draft(
         &self,
         Parameters(a): Parameters<SaveMailDraftArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let body = modules::mail::prepare_body(a.body.as_deref(), a.html_file.as_deref(), a.html.as_deref())
+            .map_err(map_domain_err_ctx("본문 입력 오류 — 발송하지 않았습니다"))?;
         self.ensure_session().await?;
         let to = recipient_or_self(&self.client, &a.to);
         let cc = a.cc.as_deref().unwrap_or("");
@@ -89,7 +93,7 @@ impl Amaranth {
             cc,
             bcc,
             &a.subject,
-            &a.body,
+            &body,
             &a.attachments,
             a.signature,
         )
@@ -114,8 +118,19 @@ impl Amaranth {
         Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
     }
 
+    #[tool(description = "임시보관 초안을 미리 보고 발송할 본문을 검증 기록으로 등록한다. 발송하지 않는다. 웹·구버전 초안도 원본 HTML·서식을 다시 작성하지 않고 사용할 수 있다. 반환 body_html은 원문이며 도구가 렌더링하거나 외부 이미지를 다운로드하지 않는다. 본문·수신자·첨부를 사용자에게 확인받은 뒤 send_mail_from_draft(draft_muid)로 보낸다. 빈 본문·서명만 있는 초안은 거부한다. 이 검증은 현재 초안의 기준점을 만드는 것으로, 과거에 의도한 본문이 누락됐는지까지 증명하지 않는다. 미리보기 후 본문이 바뀌면 다시 미리 보고 확인받아야 한다.")]
+    async fn preview_mail_draft(
+        &self,
+        Parameters(a): Parameters<PreviewMailDraftArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::mail::preview_mail_draft(&self.client, &a.draft_muid)
+            .await.map_err(map_domain_err_ctx("초안 미리보기 실패"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
     #[tool(
-        description = "save_mail_draft로 본문 검증을 마친 초안만 ID로 **실제로 발송한다**. 검증 기록이 없거나 저장 후 본문이 바뀌면 발송하지 않는다(웹·구버전 초안은 웹에서 발송하거나 body로 새로 작성할 것). 임시보관함(DRAFTS)에 저장된 초안을 발송한다 — ⚠️ 되돌릴 수 없다. save_mail_draft로 만든 초안을 사람이 확인한 뒤 '이제 보내라'고 지시할 때 쓰는 도구다. 제목·본문·수신자·첨부는 **초안에 저장된 것을 그대로** 쓴다(to 인자를 주면 수신자만 덮어쓴다). 발송 성공 후 임시보관함 원본을 삭제한다 — ⚠️ 이 삭제는 휴지통을 거치지 않는 것으로 보인다(발송 직후 휴지통 건수 불변 관측). 삭제가 실패하면 발송은 성공으로 보고하되 `draft_deleted:false`가 실리니, 그때는 사람이 임시보관함에서 지워야 같은 메일을 또 보내지 않는다. 제약 — ① **초안을 못 찾으면 보내지 않는다**: 실재 확인이 임시보관함 **최근 20건**만 훑으므로 초안이 21건 이상 쌓인 계정에서는 오래된 초안을 이 도구로 못 보낸다(웹에서 발송하거나 초안을 정리할 것). ② 본문·제목·첨부목록 중 하나라도 초안 응답에서 읽어내지 못하면 **보내지 않는다**(내용이 빈 메일·첨부 누락 방지). ③ 첨부는 승계하지만 **파일명에 콤마가 있거나, 같은 이름의 첨부가 둘 이상이거나, 대용량 첨부(bigFile)면 거부**한다(그 경로는 미실측 — 웹에서 발송할 것). ④ **참조(cc)·숨은참조(bcc)는 초안에 저장된 것을 그대로 승계**해 발송한다(반환값의 cc/bcc로 무엇이 실렸는지 확인할 것). 다만 참조를 응답에서 **읽어내지 못하면 보내지 않는다** — 참조가 빠진 채 나가는 것을 막기 위해서다."
+        description = "save_mail_draft 또는 preview_mail_draft로 본문 검증을 마친 초안만 ID로 **실제로 발송한다**. 검증 기록이 없거나 저장 후 본문이 바뀌면 발송하지 않는다(웹·구버전 초안은 preview_mail_draft로 미리 보고 사용자 확인 후 발송할 것). 임시보관함(DRAFTS)에 저장된 초안을 발송한다 — ⚠️ 되돌릴 수 없다. save_mail_draft로 만든 초안을 사람이 확인한 뒤 '이제 보내라'고 지시할 때 쓰는 도구다. 제목·본문·수신자·첨부는 **초안에 저장된 것을 그대로** 쓴다(to 인자를 주면 수신자만 덮어쓴다). 발송 성공 후 임시보관함 원본을 삭제한다 — ⚠️ 이 삭제는 휴지통을 거치지 않는 것으로 보인다(발송 직후 휴지통 건수 불변 관측). 삭제가 실패하면 발송은 성공으로 보고하되 `draft_deleted:false`가 실리니, 그때는 사람이 임시보관함에서 지워야 같은 메일을 또 보내지 않는다. 제약 — ① **초안을 못 찾으면 보내지 않는다**: 실재 확인이 임시보관함 **최근 20건**만 훑으므로 초안이 21건 이상 쌓인 계정에서는 오래된 초안을 이 도구로 못 보낸다(웹에서 발송하거나 초안을 정리할 것). ② 본문·제목·첨부목록 중 하나라도 초안 응답에서 읽어내지 못하면 **보내지 않는다**(내용이 빈 메일·첨부 누락 방지). ③ 첨부는 승계하지만 **파일명에 콤마가 있거나, 같은 이름의 첨부가 둘 이상이거나, 대용량 첨부(bigFile)면 거부**한다(그 경로는 미실측 — 웹에서 발송할 것). ④ **참조(cc)·숨은참조(bcc)는 초안에 저장된 것을 그대로 승계**해 발송한다(반환값의 cc/bcc로 무엇이 실렸는지 확인할 것). 다만 참조를 응답에서 **읽어내지 못하면 보내지 않는다** — 참조가 빠진 채 나가는 것을 막기 위해서다."
     )]
     async fn send_mail_from_draft(
         &self,

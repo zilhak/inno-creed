@@ -3,11 +3,114 @@
 
 use anyhow::{Result, anyhow, bail};
 use pulldown_cmark::{Event, Options, Parser, html};
+use scraper::{Html, Node};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 use crate::modules::board::html_to_text;
 use crate::{client::GwClient, error::InvalidInput};
+
+/// 입력을 한 번만 읽어 확정한다. 서식 있는 원문은 Markdown 변환을 거치지 않는다.
+pub struct PreparedBody {
+    pub(super) html: String,
+    pub(super) rich: bool,
+}
+
+pub fn prepare_body(
+    body: Option<&str>,
+    html_file: Option<&str>,
+    html: Option<&str>,
+) -> Result<PreparedBody> {
+    if [body.is_some(), html_file.is_some(), html.is_some()]
+        .into_iter()
+        .filter(|present| *present)
+        .count()
+        != 1
+    {
+        return Err(InvalidInput::new("body, html_file, html 중 정확히 하나를 지정하세요. 본문을 생략하거나 여러 입력을 함께 사용할 수 없습니다").into());
+    }
+    if let Some(body) = body {
+        return Ok(PreparedBody {
+            html: render_body(body)?,
+            rich: false,
+        });
+    }
+    let html = if let Some(path) = html_file {
+        let path = std::path::Path::new(path);
+        if !path.is_absolute() {
+            return Err(InvalidInput::new(
+                "html_file은 MCP 서버 머신의 UTF-8 HTML 파일 절대경로여야 합니다",
+            )
+            .into());
+        }
+        std::fs::read_to_string(path)
+            .map_err(|e| InvalidInput::new(format!("html_file을 읽을 수 없습니다: {e}")))?
+    } else {
+        html.unwrap().to_owned()
+    };
+    validate_html(&html)?;
+    Ok(PreparedBody { html, rich: true })
+}
+
+/// 서명·head·style·script를 본문으로 오인하지 않는다. 이미지 본문은 허용한다.
+/// CSS를 실제 렌더링하지 않으므로 모든 숨김 스타일을 판정하는 검사는 아니다.
+pub(super) fn validate_html(html: &str) -> Result<()> {
+    let document = Html::parse_document(html);
+    let meaningful = document.tree.nodes().any(|node| {
+        if node
+            .ancestors()
+            .chain(std::iter::once(node))
+            .any(|ancestor| {
+                let Node::Element(element) = ancestor.value() else {
+                    return false;
+                };
+                matches!(element.name(), "head" | "style" | "script" | "template")
+                    || element.attr("class").is_some_and(|classes| {
+                        classes.split_whitespace().any(|c| c == "dze_signature")
+                    })
+            })
+        {
+            return false;
+        }
+        match node.value() {
+            Node::Text(text) => !text.trim().is_empty(),
+            Node::Element(element) => {
+                element.name() == "img"
+                    && element
+                        .attr("src")
+                        .is_some_and(|src| !src.trim().is_empty())
+            }
+            _ => false,
+        }
+    });
+    if !meaningful {
+        return Err(InvalidInput::new("발송하지 않았습니다. 본문이 비어 있거나 등록 서명만 있습니다. 본문 텍스트 또는 이미지를 넣으세요").into());
+    }
+    Ok(())
+}
+
+/// 파서가 문서 래퍼·엔티티·속성 순서를 정규화한다. 텍스트뿐 아니라 스타일·링크·이미지도 대조한다.
+/// 서버가 실질적인 HTML을 바꾸면 성공으로 간주하지 않는다(화면 렌더링 동등성 판정은 아님).
+pub(super) fn verify_rich(expected: &str, actual: &str) -> Result<()> {
+    let normalize = |input: &str| Html::parse_document(input).root_element().html();
+    if normalize(expected) != normalize(actual) {
+        bail!("저장된 HTML의 서식·구조·이미지·링크가 작성 원문과 일치하지 않습니다");
+    }
+    Ok(())
+}
+
+pub(super) fn preview_text(html: &str) -> String {
+    let mut document = Html::parse_document(html);
+    let selector = scraper::Selector::parse("head, style, script, template").unwrap();
+    let hidden: Vec<_> = document
+        .select(&selector)
+        .map(|element| element.id())
+        .collect();
+    for id in hidden {
+        document.tree.get_mut(id).unwrap().detach();
+    }
+    html_to_text(&document.root_element().html())
+}
 
 pub fn render_body(body: &str) -> Result<String> {
     if body.trim().is_empty() {
@@ -75,7 +178,7 @@ pub(super) fn remember(c: &GwClient, muid: &str, html: &str) -> Result<()> {
 fn verify_record(record: &str, html: &str) -> Result<()> {
     if record != digest(html) {
         bail!(
-            "검증 후 초안 본문이 변경되었습니다 — 발송하지 않았습니다. body로 새 초안을 작성하고 확인하세요"
+            "검증 후 초안 본문이 변경되었습니다 — 발송하지 않았습니다. preview_mail_draft로 다시 미리 보고 내용을 확인받으세요"
         );
     }
     Ok(())
@@ -84,7 +187,7 @@ fn verify_record(record: &str, html: &str) -> Result<()> {
 pub(super) fn require_verified(c: &GwClient, muid: &str, html: &str) -> Result<()> {
     let path = record_path(c, muid)?;
     let record = std::fs::read_to_string(path).map_err(|_| anyhow!(
-        "draft_muid={muid}의 본문 검증 기록을 읽을 수 없습니다 — 발송하지 않았습니다. 웹·구버전 초안은 웹에서 발송하거나 save_mail_draft(body)로 새로 작성하세요"
+        "draft_muid={muid}의 본문 검증 기록을 읽을 수 없습니다 — 발송하지 않았습니다. preview_mail_draft로 원본 초안을 미리 보고 내용을 확인받으세요"
     ))?;
     verify_record(&record, html).map_err(|error| anyhow!("draft_muid={muid}: {error}"))
 }
@@ -97,6 +200,74 @@ pub(super) fn forget(c: &GwClient, muid: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rich_html_and_file_preserve_source_without_markdown_conversion() {
+        let source = "<!doctype html><html><head><style>.price {color:red}</style></head><body><table><tr><td rowspan=\"2\" style=\"text-align:right\">금액</td></tr></table><img src=\"cid:logo\"></body></html>";
+        let inline = prepare_body(None, None, Some(source)).unwrap();
+        assert_eq!(inline.html, source);
+        assert!(inline.rich);
+        let dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".claude-workspace/mail-body-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("rich-{}.html", std::process::id()));
+        std::fs::write(&file, source).unwrap();
+        let imported = prepare_body(None, file.to_str(), None).unwrap();
+        std::fs::remove_file(file).unwrap();
+        assert_eq!(imported.html, source);
+        assert!(imported.rich);
+    }
+
+    #[test]
+    fn body_source_must_be_unambiguous_and_nonempty() {
+        for (body, file, html) in [
+            (None, None, None),
+            (Some("본문"), None, Some("<p>본문</p>")),
+            (Some("본문"), Some("unused.html"), None),
+            (None, Some("unused.html"), Some("본문")),
+            (None, Some("relative.html"), None),
+            (None, None, Some("  ")),
+        ] {
+            assert!(prepare_body(body, file, html).is_err());
+        }
+        assert!(!prepare_body(Some("본문"), None, None).unwrap().rich);
+    }
+
+    #[test]
+    fn signature_only_is_not_a_previewable_body_but_images_are() {
+        for html in [
+            "",
+            "<p><br></p>",
+            "<style>body {color:red}</style>",
+            "<!-- 설명 -->",
+            "<script>alert('본문 아님')</script>",
+            "<div class=\"other dze_signature\"><p>감사합니다</p><img src=\"cid:signature\"></div>",
+        ] {
+            assert!(validate_html(html).is_err(), "{html}");
+        }
+        assert!(validate_html("<img src=\"cid:body-image\">").is_ok());
+        assert!(validate_html("<p>본문</p><div class=\"dze_signature\">서명</div>").is_ok());
+        let text = preview_text(
+            "<head><style>p{color:red}</style></head><body><p>본문</p><script>hidden()</script></body>",
+        );
+        assert_eq!(text.trim(), "본문");
+    }
+
+    #[test]
+    fn rich_verification_detects_format_link_and_image_loss() {
+        let source = "<p style=\"color:red\"><a href=\"https://example.com/a\">본문</a></p><img src=\"cid:logo\">";
+        assert!(verify_rich(source, source).is_ok());
+        for changed in [
+            source.replace("color:red", "color:blue"),
+            source.replace("example.com/a", "example.com/b"),
+            source.replace("<img src=\"cid:logo\">", ""),
+            source.replace("cid:logo", "cid:other"),
+        ] {
+            assert!(verify_rich(source, &changed).is_err());
+        }
+        assert!(verify_rich("<p style='color:red' title='A&amp;B'>본문</p>",
+            "<html><head></head><body><p title=\"A&amp;B\" style=\"color:red\">본문</p></body></html>").is_ok());
+    }
 
     #[test]
     fn markdown_preserves_content_and_line_breaks() {

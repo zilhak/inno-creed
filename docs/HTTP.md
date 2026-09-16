@@ -27,7 +27,7 @@ inno-creed는 로그인을 받지 않습니다. **서버가 도는 머신의 브
 
 ### 3. 파일 경로가 "서버 머신" 기준이다
 
-`download_mail_attachment` · `download_notice_attachment` · `download_approval_attachment` · `download_body_image`는 **서버가 도는 머신의 로컬 경로**에 파일을 씁니다. `send_mail`의 첨부도 서버 머신의 로컬 경로에서 읽습니다. 클라이언트가 원격이면 이 경로들의 의미가 클라이언트 쪽 기대와 어긋납니다.
+`download_mail_attachment` · `download_notice_attachment` · `download_approval_attachment` · `download_body_image`는 **서버가 도는 머신의 로컬 경로**에 파일을 씁니다. `send_mail`/`save_mail_draft`의 첨부와 `html_file`도 서버 머신의 로컬 경로에서 읽습니다. 클라이언트가 원격이면 이 경로들의 의미가 클라이언트 쪽 기대와 어긋납니다.
 
 ### 결론: 같은 머신 안에서만
 
@@ -165,7 +165,7 @@ INNO_CREED_HTTP_ADDR=127.0.0.1:8899 \
 - 빌드 통과 — 기존 소스 수정 없이 의존성 2줄 + 바이너리 1개 추가만으로.
 - 토큰 없는 요청 → `401`.
 - 토큰 있는 `initialize` → `200`, `mcp-session-id` 발급, `instructions` 정상 전달.
-- `tools/list` → **당시의 도구 49개 전부 노출** (stdio 판과 동일한 표면). 49는 2026-08-10 시점의 수이고 지금은 58개다 — 요점은 개수가 아니라 **두 전송의 도구 표면이 같다**는 것이다.
+- `tools/list` → **당시의 도구 49개 전부 노출** (stdio 판과 동일한 표면). 49는 2026-08-10 시점의 수이고 지금은 59개다 — 요점은 개수가 아니라 **두 전송의 도구 표면이 같다**는 것이다.
 
 검증 후 변경분은 되돌렸습니다. 저장소에는 이 문서만 있고 HTTP 바이너리 코드는 없습니다.
 

@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
 mod body;
-pub use body::render_body;
+pub use body::{render_body, prepare_body, PreparedBody};
 
 use crate::client::GwClient;
 use crate::error::InvalidInput;
@@ -298,6 +298,10 @@ fn with_signature(html: &str, init: &Value, on: bool) -> (String, bool) {
     if sig.is_empty() {
         return (html.to_string(), false);
     }
+    // 전체 HTML 문서의 head 스타일을 유지하고 서명을 body 안에 삽입한다.
+    if let Some(end) = html.to_ascii_lowercase().rfind("</body>") {
+        return (format!("{}{}{}", &html[..end], sig, &html[end..]), true);
+    }
     (format!("{html}{sig}"), true)
 }
 
@@ -491,7 +495,7 @@ pub async fn send_mail(
     cc: &str,
     bcc: &str,
     subject: &str,
-    body: &str,
+    body: &PreparedBody,
     attachments: &[String],
     signature: bool,
 ) -> Result<Value> {
@@ -542,11 +546,11 @@ pub async fn save_mail_draft(
     cc: &str,
     bcc: &str,
     subject: &str,
-    body: &str,
+    body: &PreparedBody,
     attachments: &[String],
     signature: bool,
 ) -> Result<Value> {
-    let html = render_body(body)?;
+    let html = &body.html;
     let init = compose_init(c).await?;
     let (uid_auth_list, big_file_cnt) = attachment_fields(c, attachments).await?;
     // 프론트는 제목이 비면 "(제목없음)"으로 채워 저장한다.
@@ -555,7 +559,7 @@ pub async fn save_mail_draft(
     } else {
         subject
     };
-    let (html, signature_attached) = with_signature(&html, &init, signature);
+    let (html, signature_attached) = with_signature(html, &init, signature);
     let cf = ComposeForm::new(&init, to, subject, &html, uid_auth_list, big_file_cnt)
         .with_carbon_copy(cc, bcc);
     let form = || {
@@ -580,7 +584,11 @@ pub async fn save_mail_draft(
         let stored = compose_init_draft(c, &draft_muid).await?;
         let actual = stored.pointer("/mailInfo/mime/body/html").and_then(Value::as_str)
             .ok_or_else(|| anyhow!("저장 본문을 읽지 못했습니다"))?;
-        body::verify_saved(&html, actual)?;
+        if body.rich {
+            body::verify_rich(&html, actual)?;
+        } else {
+            body::verify_saved(&html, actual)?;
+        }
         body::remember(c, &draft_muid, actual)?;
         Ok::<_, anyhow::Error>(())
     }.await;
@@ -757,6 +765,27 @@ pub async fn send_mail_from_draft(
         } else {
             delete_note
         }
+    }))
+}
+
+/// 기존 초안의 본문을 그대로 보여 주고 발송 기준점으로 기록한다. 발송하지 않는다.
+/// 과거 작성 원문이 없으므로 원문과의 비교 검증이라고 표시하지 않는다.
+pub async fn preview_mail_draft(c: &GwClient, draft_muid: &str) -> Result<Value> {
+    let draft_muid = draft_muid.trim();
+    if draft_muid.is_empty() { return Err(InvalidInput::new("draft_muid가 비어 있습니다").into()); }
+    let drafts = list_drafts(c, 1, DRAFT_READBACK_PAGE).await?;
+    let found = ensure_draft_exists(&drafts, draft_muid)?;
+    let init = compose_init_draft(c, draft_muid).await?;
+    let plan = plan_draft_send(found, &init, draft_muid, "")?;
+    body::validate_html(&plan.html)?;
+    body::remember(c, draft_muid, &plan.html)?;
+    Ok(json!({
+        "draft_muid": draft_muid, "sent": false, "ready_for_send": true,
+        "requires_user_confirmation": true, "verification": "existing_draft_snapshot",
+        "subject": plan.subject, "to": plan.to, "cc": plan.cc, "bcc": plan.bcc,
+        "body": body::preview_text(&plan.html), "body_html": plan.html,
+        "attachments": plan.files,
+        "note": "현재 초안의 본문을 발송 기준으로 기록했습니다. 과거 원문과의 대조 검증은 아닙니다. 내용과 수신자를 확인받은 뒤 같은 ID로 발송하세요."
     }))
 }
 
@@ -1455,6 +1484,16 @@ pub async fn delete_mails(c: &GwClient, uids: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 전체_html_문서의_head를_보존하고_body_안에_서명을_넣는다() {
+        let html = "<html><head><style>p {color:red}</style></head><body><p>본문</p></body></html>";
+        let init = json!({"signature": "<div class=\"dze_signature\">서명</div>"});
+        let (with, attached) = with_signature(html, &init, true);
+        assert!(attached);
+        assert!(with.contains("<style>p {color:red}</style>"));
+        assert!(with.contains("<p>본문</p><div class=\"dze_signature\">서명</div></body>"));
+    }
 
     /// 타입이 달라도 같은 상태로 판정해야 사전 확인과 사후 검증이 어긋나지 않는다.
     #[test]

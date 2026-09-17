@@ -97,8 +97,11 @@ pub fn request_quit_claude_desktop() -> Result<(), String> {
             Ok(o) => {
                 let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
                 // 애플이벤트가 막혔어도 **신호**는 보낼 수 있다(같은 사용자의 프로세스라 권한이 다르다).
-                if signal_claude(&["-x", "Claude"]) {
-                    return Ok(());
+                match signal_claude(&["-x", "Claude"]) {
+                    Signaled::Sent => return Ok(()),
+                    Signaled::Denied(d) => return Err(denied_hint(&d)),
+                    Signaled::Failed(d) => return Err(d),
+                    Signaled::NoMatch => {}
                 }
                 return Err(if err.contains("-1743") {
                     "macOS가 Apple 이벤트 전송을 막았습니다(-1743). [시스템 설정 → 개인정보 보호 및 보안 → 자동화]에서 \
@@ -127,22 +130,64 @@ pub fn request_quit_claude_desktop() -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        if signal_claude(&["-x", "Claude"]) {
-            Ok(())
-        } else {
-            Err("종료 신호를 받을 프로세스를 찾지 못했습니다.".to_string())
+        match signal_claude(&["-x", "Claude"]) {
+            Signaled::Sent => Ok(()),
+            Signaled::Denied(d) => Err(denied_hint(&d)),
+            Signaled::Failed(d) => Err(d),
+            Signaled::NoMatch => Err("종료 신호를 받을 프로세스를 찾지 못했습니다.".to_string()),
         }
     }
 }
 
-/// `pkill`로 신호를 보내고 **실제로 하나라도 맞았는지**를 돌려준다(pkill은 맞은 게 없으면 1).
+/// `pkill`의 결과. **종료 코드만으로는 판단할 수 없다** — 대상을 찾아 신호를 보냈는데
+/// 권한이 없어 거부된 경우에도 pkill은 "못 찾음"과 **똑같이 1**을 돌려주고, 진짜 사유는
+/// stderr에만 적는다(실측: `pkill: signalling pid 535: Operation not permitted`).
+/// 그래서 exit 코드와 stderr를 함께 본다 — 안 그러면 권한 거부를 "그런 프로세스 없음"으로
+/// 잘못 안내하게 된다.
 #[cfg(unix)]
-fn signal_claude(args: &[&str]) -> bool {
-    std::process::Command::new("/usr/bin/pkill")
-        .args(args)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+enum Signaled {
+    /// 하나 이상에 신호가 갔다.
+    Sent,
+    /// 맞는 프로세스가 없었다.
+    NoMatch,
+    /// 찾았지만 신호를 거부당했다(다른 사용자 계정 소유, 보호된 프로세스 등).
+    Denied(String),
+    /// 그 밖의 실패(pkill 자체를 못 돌렸다 등).
+    Failed(String),
+}
+
+#[cfg(unix)]
+fn signal_claude(args: &[&str]) -> Signaled {
+    match std::process::Command::new("/usr/bin/pkill").args(args).output() {
+        Ok(o) if o.status.success() => Signaled::Sent,
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            classify_pkill_stderr(&err)
+        }
+        Err(e) => Signaled::Failed(format!("pkill을 실행할 수 없습니다: {e}")),
+    }
+}
+
+/// stderr 한 줄로 실패 종류를 가른다(테스트 가능하도록 분리).
+#[cfg(unix)]
+fn classify_pkill_stderr(err: &str) -> Signaled {
+    if err.is_empty() {
+        Signaled::NoMatch
+    } else if err.contains("Operation not permitted") || err.contains("not permitted") {
+        Signaled::Denied(err.to_string())
+    } else {
+        Signaled::Failed(err.to_string())
+    }
+}
+
+/// 신호 거부를 사람이 읽을 안내로. 같은 사용자의 앱은 보통 끌 수 있으므로, 거부됐다면
+/// 대개 **다른 로그인 계정**에서 돌고 있는 것이다(사용자 빠른 전환).
+#[cfg(unix)]
+fn denied_hint(detail: &str) -> String {
+    format!(
+        "프로세스를 찾았지만 종료 신호가 거부됐습니다({detail}). 다른 사용자 계정에서 Claude Desktop이 \
+         실행 중이거나(사용자 빠른 전환), 관리자 권한이 필요한 상태입니다. 그 계정에서 직접 종료해주세요."
+    )
 }
 
 /// 마지막 수단. 정상 종료 요청이 통하지 않을 때만 쓴다 — 앱이 저장하지 못한 것이 있으면 잃는다.
@@ -151,12 +196,15 @@ fn signal_claude(args: &[&str]) -> bool {
 pub fn force_quit_claude_desktop() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        if signal_claude(&["-9", "-f", "/Claude.app/Contents/"]) {
-            Ok(())
-        } else {
-            Err("강제 종료할 프로세스를 찾지 못했습니다. 터미널에서 `pkill -9 -f \"/Claude.app/Contents/\"`를 \
+        match signal_claude(&["-9", "-f", "/Claude.app/Contents/"]) {
+            Signaled::Sent => Ok(()),
+            Signaled::Denied(d) => Err(denied_hint(&d)),
+            Signaled::Failed(d) => Err(d),
+            Signaled::NoMatch => Err(
+                "강제 종료할 프로세스를 찾지 못했습니다. 터미널에서 `pkill -9 -f \"/Claude.app/Contents/\"`를 \
                  직접 실행하거나, 활성 상태 보기에서 Claude를 종료해주세요."
-                .to_string())
+                    .to_string(),
+            ),
         }
     }
     #[cfg(target_os = "windows")]
@@ -175,10 +223,11 @@ pub fn force_quit_claude_desktop() -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        if signal_claude(&["-9", "-x", "Claude"]) {
-            Ok(())
-        } else {
-            Err("강제 종료할 프로세스를 찾지 못했습니다.".to_string())
+        match signal_claude(&["-9", "-x", "Claude"]) {
+            Signaled::Sent => Ok(()),
+            Signaled::Denied(d) => Err(denied_hint(&d)),
+            Signaled::Failed(d) => Err(d),
+            Signaled::NoMatch => Err("강제 종료할 프로세스를 찾지 못했습니다.".to_string()),
         }
     }
 }
@@ -236,6 +285,19 @@ mod tests {
     fn macos_lists_chrome_only() {
         let names: Vec<_> = extension_browsers().iter().map(|b| b.name).collect();
         assert_eq!(names, ["Chrome"]);
+    }
+
+    /// 실측한 pkill 동작: 권한 거부도 exit 1이라 stderr로만 갈린다.
+    /// 이걸 놓치면 "프로세스를 찾지 못했다"고 잘못 안내하게 된다.
+    #[cfg(unix)]
+    #[test]
+    fn pkill_permission_denied_is_not_reported_as_missing() {
+        assert!(matches!(classify_pkill_stderr(""), Signaled::NoMatch));
+        assert!(matches!(
+            classify_pkill_stderr("pkill: signalling pid 535: Operation not permitted"),
+            Signaled::Denied(_)
+        ));
+        assert!(matches!(classify_pkill_stderr("pkill: 뭔가 다른 오류"), Signaled::Failed(_)));
     }
 
     #[cfg(target_os = "macos")]

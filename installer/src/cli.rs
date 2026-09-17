@@ -150,9 +150,13 @@ fn run(
             continue; // 무엇을 입력했든 "다시 확인"으로 다룬다.
         }
         if asked_to_quit {
-            crate::platform::force_quit_claude_desktop();
+            if let Err(e) = crate::platform::force_quit_claude_desktop() {
+                writeln!(output, "  ⚠️ {e}")?;
+            }
         } else {
-            crate::platform::request_quit_claude_desktop();
+            if let Err(e) = crate::platform::request_quit_claude_desktop() {
+                writeln!(output, "  ⚠️ {e}")?;
+            }
             asked_to_quit = true;
         }
         wait_until_closed(output)?;

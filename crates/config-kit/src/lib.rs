@@ -179,10 +179,34 @@ pub fn write_atomic(path: &Path, value: &Value) -> io::Result<()> {
 /// `...\WindowsApps\Claude_<hash>\app\Claude....exe`). 이름만 보면 CLI를 쓰는 사람은
 /// 100%에 가깝게 "Desktop이 켜져 있다"는 오탐을 만난다 — 실행 파일 **경로**로 구분한다.
 pub fn is_claude_desktop_running() -> bool {
+    !running_claude_desktop_processes().is_empty()
+}
+
+/// Claude Desktop으로 판정한 프로세스들. (pid, 실행 파일 경로)
+///
+/// **왜 목록을 밖으로 내주는가**: "다 껐는데도 켜져 있다고 한다"는 문의가 실제로 왔는데,
+/// 화면이 판정 근거를 보여주지 않아 원격에서는 원인을 짚을 수 없었다(메뉴 막대에 남은 본체인지,
+/// 죽지 않은 헬퍼인지, 자기를 띄운 부모인지). 판정한 쪽이 근거를 같이 내주면 그 화면 하나로 끝난다.
+///
+/// 프로세스 목록을 못 읽는 환경(샌드박스에서 `process-info` 차단 등)에서는 **빈 목록**이 되고,
+/// 호출부는 "꺼져 있다"로 본다 — 못 본 것을 켜져 있다고 우기지 않는다(실측: `ps`조차 막히면
+/// 열거 결과가 0건이 된다).
+pub fn running_claude_desktop_processes() -> Vec<(u32, String)> {
     use sysinfo::System;
     let mut sys = System::new_all();
     sys.refresh_all();
-    sys.processes().values().any(is_claude_desktop_process)
+    sys.processes()
+        .values()
+        .filter(|p| is_claude_desktop_process(p))
+        .map(|p| {
+            (
+                p.pid().as_u32(),
+                p.exe().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| {
+                    p.name().to_string_lossy().into_owned()
+                }),
+            )
+        })
+        .collect()
 }
 
 fn is_claude_desktop_process(p: &sysinfo::Process) -> bool {

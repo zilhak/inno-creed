@@ -82,49 +82,104 @@ pub fn post_copy(dest: &Path) {
 /// 강제 종료가 아니라 **종료 요청**이다(macOS는 quit 애플이벤트, Windows는 `WM_CLOSE`,
 /// Linux는 `SIGTERM`) — 앱이 스스로 상태를 저장하고 닫을 기회를 준다. 이것으로 안 닫히는
 /// 경우에만 `force_quit_claude_desktop`을 쓴다.
-pub fn request_quit_claude_desktop() {
+pub fn request_quit_claude_desktop() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let ok = std::process::Command::new("/usr/bin/osascript")
+        // 다른 앱에 quit을 보내는 것은 **자동화(Apple 이벤트) 권한**이 필요한 일이다. 서명되지 않은
+        // 이 프로그램은 첫 시도에서 허용 프롬프트를 받는데, 거기서 "허용 안 함"을 눌렀거나 회사
+        // 정책(MDM)이 막아두면 osascript가 **-1743**으로 실패한다. 예전에는 그 실패를 통째로
+        // 삼켜서, 사용자는 버튼을 눌러도 화면이 그대로인 이유를 알 수 없었다(실제 문의).
+        match std::process::Command::new("/usr/bin/osascript")
             .args(["-e", r#"tell application id "com.anthropic.claudefordesktop" to quit"#])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !ok {
-            // 애플이벤트를 못 받는 상태(응답 없음 등)면 정중한 종료 신호로 한 번 더.
-            let _ = std::process::Command::new("/usr/bin/pkill").args(["-x", "Claude"]).status();
+            .output()
+        {
+            Ok(o) if o.status.success() => return Ok(()),
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                // 애플이벤트가 막혔어도 **신호**는 보낼 수 있다(같은 사용자의 프로세스라 권한이 다르다).
+                if signal_claude(&["-x", "Claude"]) {
+                    return Ok(());
+                }
+                return Err(if err.contains("-1743") {
+                    "macOS가 Apple 이벤트 전송을 막았습니다(-1743). [시스템 설정 → 개인정보 보호 및 보안 → 자동화]에서 \
+                     이 설치 프로그램에 Claude 제어를 허용하거나, 아래 [강제 종료]를 쓰세요."
+                        .to_string()
+                } else if err.is_empty() {
+                    "종료 요청이 받아들여지지 않았습니다. 아래 [강제 종료]를 쓰세요.".to_string()
+                } else {
+                    format!("종료 요청이 실패했습니다: {err}")
+                });
+            }
+            Err(e) => return Err(format!("osascript를 실행할 수 없습니다: {e}")),
         }
     }
     #[cfg(target_os = "windows")]
     {
         // /F 없이 = 창에 닫기 요청. 트레이에 남는 구현이면 안 꺼질 수 있어 force가 뒤를 받는다.
-        let _ = std::process::Command::new("taskkill").args(["/IM", "Claude.exe"]).status();
+        match std::process::Command::new("taskkill").args(["/IM", "Claude.exe"]).output() {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(format!(
+                "종료 요청이 실패했습니다: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+            Err(e) => Err(format!("taskkill을 실행할 수 없습니다: {e}")),
+        }
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("pkill").args(["-x", "Claude"]).status();
+        if signal_claude(&["-x", "Claude"]) {
+            Ok(())
+        } else {
+            Err("종료 신호를 받을 프로세스를 찾지 못했습니다.".to_string())
+        }
     }
+}
+
+/// `pkill`로 신호를 보내고 **실제로 하나라도 맞았는지**를 돌려준다(pkill은 맞은 게 없으면 1).
+#[cfg(unix)]
+fn signal_claude(args: &[&str]) -> bool {
+    std::process::Command::new("/usr/bin/pkill")
+        .args(args)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// 마지막 수단. 정상 종료 요청이 통하지 않을 때만 쓴다 — 앱이 저장하지 못한 것이 있으면 잃는다.
 /// macOS는 헬퍼 프로세스까지 함께 정리한다(메인만 죽이면 `is_claude_desktop_running`이
 /// 헬퍼를 보고 계속 "켜져 있음"이라 답한다).
-pub fn force_quit_claude_desktop() {
+pub fn force_quit_claude_desktop() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("/usr/bin/pkill")
-            .args(["-9", "-f", "/Claude.app/Contents/"])
-            .status();
+        if signal_claude(&["-9", "-f", "/Claude.app/Contents/"]) {
+            Ok(())
+        } else {
+            Err("강제 종료할 프로세스를 찾지 못했습니다. 터미널에서 `pkill -9 -f \"/Claude.app/Contents/\"`를 \
+                 직접 실행하거나, 활성 상태 보기에서 Claude를 종료해주세요."
+                .to_string())
+        }
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("taskkill")
+        match std::process::Command::new("taskkill")
             .args(["/F", "/T", "/IM", "Claude.exe"])
-            .status();
+            .output()
+        {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(format!(
+                "강제 종료가 실패했습니다: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+            Err(e) => Err(format!("taskkill을 실행할 수 없습니다: {e}")),
+        }
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("pkill").args(["-9", "-x", "Claude"]).status();
+        if signal_claude(&["-9", "-x", "Claude"]) {
+            Ok(())
+        } else {
+            Err("강제 종료할 프로세스를 찾지 못했습니다.".to_string())
+        }
     }
 }
 

@@ -5,6 +5,8 @@
 //!   cargo run --quiet --bin probe -- /human/attendapplication/0hr00001 '{"coCd":"1000"}'
 //!   cargo run --quiet --bin probe -- /eap/eap110A03 @body.json
 //!   (body 생략 시 {}. body가 '@경로'면 파일에서 읽음.)
+//!   cargo run --quiet --bin probe -- fetch https://gw.innogrid.com/mail2/ out.html
+//!   (fetch = 세션 쿠키를 붙인 평범한 GET. 인증이 걸린 SPA·번들을 받아 API 코드를 캐낼 때.)
 //!   cargo run --quiet --bin probe -- raw '/gw/contentsImgController/download/<경로>' out.png
 //!   (raw = 응답 바이트를 파일로. 본문 삽입 이미지처럼 JSON이 아닌 응답을 볼 때.)
 //!   cargo run --quiet --bin probe -- form /ecm/ecm001A03 out.bin moduleGbn=BOARD 'authKeyMap={"fileIds":"<id>"}'
@@ -185,6 +187,67 @@ async fn main() -> Result<()> {
                 Err(e) => println!("ERR {e}"),
             }
         }
+        return Ok(());
+    }
+
+    // 진단: `probe cookiejar <out>` → Playwright addCookies 형식으로 세션 쿠키를 파일에 쓴다.
+    // ⚠️ 평문 크레덴셜이다. UI 캡처가 끝나면 지울 것. (브라우저 쿠키 DB를 직접 못 읽는
+    // 환경 — macOS 전체 디스크 접근 차단 등 — 에서 캡처 하네스에 세션을 넘기는 유일한 경로.)
+    if args.get(1).map(|s| s.as_str()) == Some("cookiejar") {
+        let out = args.get(2).ok_or_else(|| anyhow!("usage: probe cookiejar <out>"))?;
+        let cr = creds::from_browser()?;
+        let enc = |v: &str| -> String {
+            v.chars()
+                .map(|c| if c == '|' { "%7C".to_string() } else { c.to_string() })
+                .collect()
+        };
+        let jar = serde_json::json!([
+            {"name":"BIZCUBE_AT","value":enc(&cr.auth_token),"domain":"gw.innogrid.com","path":"/","secure":true,"httpOnly":false},
+            {"name":"BIZCUBE_HK","value":enc(&cr.sign_key),"domain":"gw.innogrid.com","path":"/","secure":true,"httpOnly":false},
+            // 아래 3개가 없으면 SPA가 **로그인 화면으로 떨어진다**(API 서명에는 위 2개로 충분하지만
+            // 프런트의 세션 판정은 이쪽을 본다). 2026-10-01 실측: oAuthToken=AT, signKey=HK 와 같은 값.
+            {"name":"BIZCUBE_TYPE","value":"WEB","domain":"gw.innogrid.com","path":"/","secure":true,"httpOnly":false},
+            {"name":"oAuthToken","value":enc(&cr.auth_token),"domain":"gw.innogrid.com","path":"/","secure":true,"httpOnly":false},
+            {"name":"signKey","value":enc(&cr.sign_key),"domain":"gw.innogrid.com","path":"/","secure":true,"httpOnly":false}
+        ]);
+        std::fs::write(out, serde_json::to_string(&jar)?)?;
+        println!("{{\"wrote\":{out:?},\"cookies\":5}}");
+        return Ok(());
+    }
+
+    // 진단: `probe fetch <url> <out>` → 프런트엔드 자산을 **세션 쿠키로** GET 해 파일로 저장.
+    // API 서명 경로가 아니라 브라우저가 보는 그대로의 페이지·번들을 받는다(신규 API 발굴용:
+    // `/mail2/` 같은 인증 필요 SPA의 청크를 받아 mainApiCode 를 읽는다).
+    if args.get(1).map(|s| s.as_str()) == Some("fetch") {
+        let url = args.get(2).ok_or_else(|| anyhow!("usage: probe fetch <url> <out>"))?;
+        let out = args.get(3).ok_or_else(|| anyhow!("usage: probe fetch <url> <out>"))?;
+        let client = GwClient::new(creds::from_browser().ok());
+        client.ensure_session().await?;
+        let cr = creds::from_browser()?;
+        let enc = |v: &str| -> String {
+            v.chars()
+                .map(|c| if c == '|' { "%7C".to_string() } else { c.to_string() })
+                .collect()
+        };
+        let cookie = format!("BIZCUBE_AT={}; BIZCUBE_HK={}", enc(&cr.auth_token), enc(&cr.sign_key));
+        let sign_path = url.split_once("://").map(|(_, r)| r).and_then(|r| r.split_once('/')).map(|(_, p)| format!("/{p}")).unwrap_or_else(|| "/".into());
+        let sign_path = sign_path.split('?').next().unwrap_or("/").to_string();
+        let tid = inno_creed::sign::transaction_id();
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs().to_string();
+        let sig = inno_creed::sign::wehago_sign(&cr.auth_token, &tid, &ts, &sign_path, &cr.sign_key);
+        let resp = reqwest::Client::new()
+            .get(url)
+            .header("Authorization", format!("Bearer {}", cr.auth_token))
+            .header("timestamp", ts)
+            .header("transaction-id", tid)
+            .header("wehago-sign", sig)
+            .header("Cookie", cookie)
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let bytes = resp.bytes().await?;
+        std::fs::write(out, &bytes)?;
+        println!("{{\"http\":{status},\"bytes\":{}}}", bytes.len());
         return Ok(());
     }
 

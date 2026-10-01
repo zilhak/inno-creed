@@ -1479,6 +1479,288 @@ pub async fn delete_mails(c: &GwClient, uids: &str) -> Result<Value> {
     Ok(result)
 }
 
+// ───────────────────── 메일함 관리 · 메일 이동 · 자동분류 ─────────────────────
+//
+// 전부 2026-10-01 실측. 근거와 왕복 로그는
+// `.claude-workspace/analyze/07-mail-module.md` "메일함 관리 · 자동분류 실측" 절.
+
+/// 시스템 메일함 이름. 이동 대상이 이 중 하나면 `targetbox`(이름)로, 아니면 `targetSeq`(seq)로
+/// 보낸다 — `mail002A08`은 둘을 **택일**로 받는다(실측: 사용자 메일함은 targetbox를 비우고,
+/// 스팸 신고/해제는 targetSeq를 비운 채 targetbox에 INBOX/SPAM을 싣는다).
+const SYSTEM_BOXES: &[&str] = &["INBOX", "SENT", "DRAFTS", "TRASH", "SPAM"];
+
+/// 자동분류 조건 필드(`fild_name` — 서버 철자가 그렇다, 오타 아님).
+///
+/// ⚠️ **모르는 값을 거르는 게 이 상수의 일이다.** 아마란스는 모르는 파라미터를 에러 없이
+/// 조용히 버리는 일이 있어(`silent-param-ignore`), 오타난 필드로 만든 규칙이 "저장됐는데
+/// 아무 메일도 안 걸리는" 상태가 된다. 그래서 호출 전에 여기서 막는다.
+pub const FILTER_FIELDS: &[&str] = &[
+    "subject",        // 제목
+    "mailfrom",       // 보낸사람 주소
+    "rcptto",         // 받는사람 주소
+    "mailfromdomain", // 보낸사람 도메인
+    "rcpttodomain",   // 받는사람 도메인
+];
+
+/// 메일함 하나의 전체 건수 — `mail000A03` 집계에서 seq로 찾는다. 모르면 `None`.
+async fn box_total(c: &GwClient, seq: i64) -> Option<i64> {
+    let counts = mailbox_counts(c).await.ok()?;
+    counts
+        .as_array()?
+        .iter()
+        .find(|x| json_str(x.get("boxnameSeq")).parse::<i64>().ok() == Some(seq))
+        .and_then(|x| json_str(x.get("totalCount")).parse::<i64>().ok())
+}
+
+/// 메일 이동 — `mail002A08` + 대상 메일함 건수 read-back.
+///
+/// ⚠️ **muid로는 검증할 수 없다.** 메일함을 옮기면 muid가 재부여된다(휴지통 이동에서 실측된
+/// 성질이고 일반 이동도 같은 계열이다). 그래서 판정은 **대상 메일함의 전체 건수 증가분**이 한다.
+/// 같은 순간에 새 메일이 도착하면 증가분이 어긋날 수 있어, 어긋남은 실패가 아니라
+/// "확인 못 함"으로 돌려준다(`docs/architecture.md` §7.1 3분법). 증가가 **아예 없으면** 실패다.
+pub async fn move_mails(c: &GwClient, uids: &str, to: &str) -> Result<Value> {
+    let uids = uids.trim();
+    if uids.is_empty() {
+        return Err(InvalidInput("muids가 비어 있다".into()).into());
+    }
+    let to = to.trim();
+    if to.is_empty() {
+        return Err(InvalidInput("to_mailbox가 비어 있다".into()).into());
+    }
+    let n = uids.split(',').filter(|s| !s.trim().is_empty()).count() as i64;
+
+    // 이름 → seq. 시스템 메일함도 목록에 있으므로 여기서 **존재 검증**까지 겸한다.
+    let seq = mbox_seq(c, to).await?;
+    let is_system = SYSTEM_BOXES.iter().any(|b| b.eq_ignore_ascii_case(to));
+    let before = box_total(c, seq).await;
+
+    let body = if is_system {
+        json!({ "uids": uids, "targetbox": to.to_uppercase(), "targetSeq": "" })
+    } else {
+        json!({ "uids": uids, "targetbox": "", "targetSeq": seq })
+    };
+    c.call("/mail/mail002A08", &body).await?;
+
+    // muid가 바뀌므로 본문 캐시의 그 키는 더 이상 쓸 수 없다(delete_mails와 같은 처리).
+    for muid in uids.split(',').map(str::trim) {
+        let _ = body::forget(c, muid);
+    }
+
+    let after = box_total(c, seq).await;
+    let (ok, note) = match (before, after) {
+        (Some(b), Some(a)) if a - b == n => (true, String::new()),
+        (Some(b), Some(a)) if a == b => {
+            bail!(
+                "메일이 이동되지 않았다 — '{to}'(seq {seq}) 건수가 {b} 그대로다. \
+                 muid가 그 메일함에 실제로 있는지, 이미 그 메일함에 있던 메일은 아닌지 확인할 것"
+            )
+        }
+        (Some(b), Some(a)) => (
+            false,
+            format!(
+                "실행은 됐으나 확인 못 함 — '{to}' 건수가 {b}→{a}({:+})로 요청한 {n}건과 다르다. \
+                 같은 순간에 새 메일이 도착했거나 일부만 옮겨졌을 수 있다",
+                a - b
+            ),
+        ),
+        _ => (
+            false,
+            "실행은 됐으나 확인 못 함 — 대상 메일함 건수를 읽지 못했다".to_string(),
+        ),
+    };
+
+    Ok(json!({
+        "ok": ok, "moved": n, "to": to, "to_mbox_seq": seq,
+        "total_before": before, "total_after": after,
+        "note": note,
+    }))
+}
+
+/// 메일함 생성 — `mail001A18`(중복검사) → `mail001A05`.
+///
+/// ⚠️ **이름은 `boxName`으로 보내야 요청한 그대로 만들어진다.** `mboxLang`으로만 주면 서버가
+/// `(1)` 접미사를 붙인다(실측 — 중복 회피가 아니다. 세상에 없는 난수 이름에도, 중복검사가
+/// "사용 가능"을 준 직후에도 똑같이 붙었다). 그래도 **생성 결과의 이름/seq는 응답에서 받아
+/// 쓴다** — 서버가 이름을 손볼 여지를 호출자가 떠안지 않기 위해서다.
+pub async fn create_mailbox(c: &GwClient, name: &str, parent: Option<&str>) -> Result<Value> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(InvalidInput("메일함 이름이 비어 있다".into()).into());
+    }
+    let mut body = json!({ "boxName": name, "mbox": name });
+    if let Some(p) = parent.map(str::trim).filter(|p| !p.is_empty()) {
+        let pseq = mbox_seq(c, p).await?;
+        body["parentSeq"] = json!(pseq.to_string());
+    }
+
+    let dup = c.call("/mail/mail001A18", &body).await?;
+    let code = json_str(dup.get("code"));
+    if code != "0" {
+        bail!(
+            "메일함 이름 '{name}'을 쓸 수 없다 — 중복검사 code={code} \
+             (\"2\" = 같은 레벨에 이미 같은 이름이 있다)"
+        );
+    }
+
+    let created = c.call("/mail/mail001A05", &body).await?;
+    let made_name = json_str(created.pointer("/mbox/name"));
+    let made_seq = json_str(created.pointer("/mbox/mboxSeq"))
+        .parse::<i64>()
+        .ok();
+
+    // read-back — 목록에 실제로 섰는지. 서버가 이름을 손봤다면 그 이름으로 찾는다.
+    let listed = match (&made_name, made_seq) {
+        (n, Some(_)) if !n.is_empty() => mbox_seq(c, n).await.ok(),
+        _ => None,
+    };
+
+    Ok(json!({
+        "ok": listed.is_some() && listed == made_seq,
+        "name": made_name,
+        "mbox_seq": made_seq,
+        "requested_name": name,
+        "renamed_by_server": !made_name.is_empty() && made_name != name,
+        "note": if listed.is_some() { "" } else { "실행은 됐으나 확인 못 함 — 목록 재조회에서 찾지 못했다" },
+    }))
+}
+
+/// 메일함 삭제 — `mail001A17`(사전검사) → `mail001A06`(실행) + 목록 read-back.
+///
+/// ⚠️ **`mail001A17`은 이름과 달리 삭제가 아니라 사전검사다.** `resultCode:0` ·
+/// `msg:"SUCCESS"`를 돌려주면서 메일함은 그대로 남는다(실측). 봐야 할 것은 `bFilter`:
+/// `true`면 그 메일함을 가리키는 자동분류 규칙이 있어 삭제가 막힌다. 실제 삭제는
+/// **`mail001A06`을 따로 불러야** 일어난다.
+///
+/// ⚠️ 메일함 안의 메일도 함께 사라진다. 비우기(`mail001A10`)와 달리 되돌릴 수 없다.
+pub async fn delete_mailbox(c: &GwClient, name: &str) -> Result<Value> {
+    let name = name.trim();
+    if SYSTEM_BOXES.iter().any(|b| b.eq_ignore_ascii_case(name)) {
+        return Err(InvalidInput(format!(
+            "'{name}'은 시스템 메일함이라 삭제할 수 없다(INBOX·SENT·DRAFTS·TRASH·SPAM)"
+        ))
+        .into());
+    }
+    let seq = mbox_seq(c, name).await?;
+
+    let pre = c
+        .call("/mail/mail001A17", &json!({ "mboxSeq": seq.to_string() }))
+        .await?;
+    if pre.get("bFilter").and_then(Value::as_bool).unwrap_or(false) {
+        bail!(
+            "메일함 '{name}'을 가리키는 자동분류 규칙이 있어 삭제할 수 없다 — \
+             list_mail_filters로 확인해 delete_mail_filter로 먼저 지울 것"
+        );
+    }
+
+    c.call("/mail/mail001A06", &json!({ "mboxSeq": seq.to_string() }))
+        .await?;
+
+    let gone = list_mailboxes(c)
+        .await
+        .map(|b| find_mbox_seq(&b, name).is_none());
+    Ok(json!({
+        "ok": gone.as_ref().copied().unwrap_or(false),
+        "deleted": name, "mbox_seq": seq,
+        "note": match gone {
+            Ok(true) => "",
+            Ok(false) => "실행은 됐으나 메일함이 목록에 그대로 있다",
+            Err(_) => "실행은 됐으나 확인 못 함 — 목록 재조회 실패",
+        },
+    }))
+}
+
+/// 자동분류 규칙 목록 — `mail025A01`의 `autodivList`.
+///
+/// 규칙이 하나도 없으면 빈 배열이다(에러 아님). 응답엔 메일함 목록도 함께 오지만
+/// 규칙만 돌려준다 — 메일함은 `list_mailboxes`가 담당한다.
+pub async fn list_mail_filters(c: &GwClient) -> Result<Value> {
+    let data = c.call("/mail/mail025A01", &json!({})).await?;
+    Ok(data.get("autodivList").cloned().unwrap_or(json!([])))
+}
+
+/// 자동분류 규칙 추가(`mail025A02`) 또는 수정(`mail025A03`) + 목록 read-back.
+///
+/// `filter_seq`가 있으면 그 규칙을 고치고, 없으면 새로 만든다.
+pub async fn save_mail_filter(
+    c: &GwClient,
+    field: &str,
+    content: &str,
+    to_mailbox: &str,
+    filter_seq: Option<i64>,
+) -> Result<Value> {
+    let field = field.trim();
+    if !FILTER_FIELDS.contains(&field) {
+        return Err(InvalidInput(format!(
+            "field '{field}'는 쓸 수 없다 — {} 중 하나여야 한다",
+            FILTER_FIELDS.join(" · ")
+        ))
+        .into());
+    }
+    let content = content.trim();
+    if content.is_empty() {
+        return Err(InvalidInput("content가 비어 있다 — 조건 없는 규칙은 만들지 않는다".into()).into());
+    }
+    let seq = mbox_seq(c, to_mailbox.trim()).await?;
+
+    let mut body = json!({
+        "mboxSeq": seq.to_string(),
+        "fild_name": field,
+        "check_data": content,
+    });
+    let path = match filter_seq {
+        Some(s) => {
+            body["autoDivSeq"] = json!(s.to_string());
+            "/mail/mail025A03"
+        }
+        None => "/mail/mail025A02",
+    };
+    c.call(path, &body).await?;
+
+    // read-back — 서버가 조용히 흘려도 여기서 드러난다.
+    let list = list_mail_filters(c).await?;
+    let saved = list.as_array().and_then(|a| {
+        a.iter().find(|r| match filter_seq {
+            Some(s) => json_str(r.get("autoDivSeq")).parse::<i64>().ok() == Some(s),
+            None => {
+                json_str(r.get("fild_name")) == field && json_str(r.get("check_data")) == content
+            }
+        })
+    });
+    let matches = saved.is_some_and(|r| {
+        json_str(r.get("fild_name")) == field
+            && json_str(r.get("check_data")) == content
+            && json_str(r.get("mboxSeq")).parse::<i64>().ok() == Some(seq)
+    });
+
+    Ok(json!({
+        "ok": matches,
+        "action": if filter_seq.is_some() { "updated" } else { "created" },
+        "filter": saved.cloned(),
+        "note": if matches { "" } else { "실행은 됐으나 목록에서 요청한 내용과 일치하는 규칙을 찾지 못했다" },
+    }))
+}
+
+/// 자동분류 규칙 삭제 — `mail025A04` + 목록 read-back.
+///
+/// ⚠️ **일괄 삭제가 아니다**(한 건씩). 여러 건이면 호출자가 반복한다 — 웹 화면도 그렇게 한다.
+pub async fn delete_mail_filter(c: &GwClient, filter_seq: i64) -> Result<Value> {
+    c.call(
+        "/mail/mail025A04",
+        &json!({ "autoDivSeq": filter_seq.to_string() }),
+    )
+    .await?;
+
+    let list = list_mail_filters(c).await?;
+    let gone = !list.as_array().is_some_and(|a| {
+        a.iter()
+            .any(|r| json_str(r.get("autoDivSeq")).parse::<i64>().ok() == Some(filter_seq))
+    });
+    Ok(json!({
+        "ok": gone, "deleted_filter_seq": filter_seq,
+        "note": if gone { "" } else { "실행은 됐으나 규칙이 목록에 그대로 있다" },
+    }))
+}
+
 /// 발송·임시저장이 공유하는 폼의 **회귀 기준선**. 발송 폼을 `ComposeForm`으로 뽑아내면서
 /// 필드가 빠지거나 값이 달라져도 컴파일러가 잡지 못하기 때문에, 실측 필드 집합을 여기 박아둔다.
 #[cfg(test)]

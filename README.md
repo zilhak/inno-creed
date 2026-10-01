@@ -65,6 +65,12 @@
 | `download_mail_attachment` | 첨부파일 저장(실행 없이 저장만) |
 | `mark_mail_unread` | **읽지 않음으로 되돌리기** — `read_mail`이 세운 읽음 플래그 해제(반영은 재조회로 검증, 이미 미읽음이면 `already`) |
 | `mailbox_counts` | 메일함별 미읽음·전체 + 계정 집계(`unreadCount`·`toMeCount`·`flaggedCount`·`attachCount`) |
+| `list_mailbox_mails` | **아무 메일함이나** 이름으로 지정해 목록 조회 — 보낸메일함·휴지통·스팸함·사용자 메일함(`list_mail_inbox`가 못 보는 곳) |
+| `move_mail` | 메일을 다른 메일함으로 이동 — ⚠️ **muid가 재부여된다**(옮긴 뒤엔 재조회 필요). 대상 메일함 건수로 검증 |
+| `create_mailbox` / `delete_mailbox` | 메일함 생성 / 삭제 — 삭제는 ⚠️ **안의 메일까지 사라진다**, 자동분류 규칙이 걸려 있으면 막는다 |
+| `list_mail_filters` | 자동분류(필터) 규칙 목록 — `autoDivSeq`가 수정·삭제 키 |
+| `save_mail_filter` | 자동분류 규칙 생성·수정(제목·보낸사람/받는사람 주소·도메인 5종 조건) — ⚠️ 이미 받은 메일은 소급 분류하지 않는다 |
+| `delete_mail_filter` | 자동분류 규칙 삭제(한 건씩) |
 
 **게시판**
 | 도구 | 기능 |
@@ -289,7 +295,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
  ├─ client   세션 lazy 취득(10분 TTL 캐시) · 헤더 주입 · POST · 응답 파싱
  ├─ modules  자원 · 일정 · 메일 · 게시판 · 전자결재 · 근태 · 조직
  │           API 래퍼 + 파생 조회 + 소유권 가드 · read-back 검증
- └─ mcp      rmcp stdio 서버 — tools/(도구 59개, 도메인별) · args/(인자 스키마) · 에러 변환
+ └─ mcp      rmcp stdio 서버 — tools/(도구 66개, 도메인별) · args/(인자 스키마) · 에러 변환
 ```
 
 크레덴셜만 브라우저에서 빌려오고, 실행은 전부 순수 HTTP입니다. 서명·세션 규격은 [architecture.md](docs/architecture.md)에 정리돼 있습니다.

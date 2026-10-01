@@ -215,4 +215,113 @@ impl Amaranth {
                 .map_err(map_domain_err_ctx("첨부 다운로드 실패"))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
     }
+
+    #[tool(
+        description = "메일을 다른 메일함으로 옮긴다(mail002A08). 대상은 **이름**으로 준다 — 시스템 메일함(INBOX·SENT·DRAFTS·TRASH·SPAM)과 사용자가 만든 메일함 둘 다 된다. 여러 건이면 uids에 muid를 콤마로 잇는다. ⚠️ **이동하면 muid가 재부여된다** — 옮긴 뒤 그 메일을 다시 다루려면 목록을 재조회해 새 muid를 얻을 것(옛 muid로는 못 찾는다). 판정은 대상 메일함 건수 증가로 한다(muid 추적이 불가능해서다): `ok:true`면 요청한 건수만큼 늘어난 것이고, 증가가 아예 없으면 오류, 증가분이 어긋나면 `ok:false`와 함께 이유를 적어 돌려준다(같은 순간 새 메일 수신 등). 휴지통으로 옮기는 것은 delete_mail과 결과가 같다."
+    )]
+    async fn move_mail(
+        &self,
+        Parameters(a): Parameters<MoveMailArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::mail::move_mails(&self.client, &a.uids, &a.to_mailbox)
+            .await
+            .map_err(map_domain_err_ctx("메일 이동 실패"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "**아무 메일함이나** 이름으로 지정해 메일 목록을 조회한다(mail003A01). list_mail_inbox(INBOX)·list_mail_drafts(DRAFTS)가 못 보는 보낸메일함·휴지통·스팸함과 **사용자가 만든 메일함**이 이 도구의 몫이다 — move_mail로 옮겼거나 자동분류로 분류된 메일을 확인하는 경로이기도 하다. ⚠️ 응답은 서버 원본 봉투 그대로다 — 메일 배열은 `Records`, 각 항목의 `muid`가 read_mail/delete_mail/move_mail의 키다. 메일함 번호는 계정마다 달라 이름으로 해석한다."
+    )]
+    async fn list_mailbox_mails(
+        &self,
+        Parameters(a): Parameters<ListMailboxMailsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let seq = modules::mail::mbox_seq(&self.client, a.mailbox.trim())
+            .await
+            .map_err(map_domain_err_ctx("메일함 조회 실패"))?;
+        let data = modules::mail::list_mails(
+            &self.client,
+            seq,
+            a.page.unwrap_or(1),
+            a.page_size.unwrap_or(20),
+        )
+        .await
+        .map_err(map_domain_err_ctx("메일함 조회 실패"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "메일함(폴더)을 새로 만든다(mail001A18 중복검사 → mail001A05). parent에 상위 메일함 이름을 주면 그 아래에 만든다(**1단계 하위까지만**). 자동분류 규칙의 대상 메일함이 필요할 때 이것부터 만든다. 응답의 `name`/`mbox_seq`가 실제로 만들어진 값이다 — `renamed_by_server:true`면 서버가 이름을 손봤다는 뜻이니 이후 참조는 요청한 이름이 아니라 응답의 `name`을 쓸 것."
+    )]
+    async fn create_mailbox(
+        &self,
+        Parameters(a): Parameters<CreateMailboxArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::mail::create_mailbox(&self.client, &a.name, a.parent.as_deref())
+            .await
+            .map_err(map_domain_err_ctx("메일함 생성 실패"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "메일함(폴더)을 삭제한다(mail001A17 사전검사 → mail001A06). ⚠️ **안에 든 메일도 함께 사라지고 되돌릴 수 없다** — 사용자가 명시적으로 지시할 때만 호출한다. 시스템 메일함(INBOX·SENT·DRAFTS·TRASH·SPAM)은 거부한다. 그 메일함을 가리키는 자동분류 규칙이 있으면 삭제하지 않고 오류로 알린다 — list_mail_filters로 확인해 delete_mail_filter로 먼저 지울 것."
+    )]
+    async fn delete_mailbox(
+        &self,
+        Parameters(a): Parameters<DeleteMailboxArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::mail::delete_mailbox(&self.client, &a.name)
+            .await
+            .map_err(map_domain_err_ctx("메일함 삭제 실패"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "메일 자동분류(필터) 규칙 목록을 조회한다(mail025A01, 부작용 없음). 각 항목은 `autoDivSeq`(규칙 id — 수정·삭제의 키), `fild_name`(조건 필드), `check_data`(조건 문자열), `mboxSeq`/`moveBoxName`(걸리면 보낼 메일함), `filterOrder`(우선순위). 규칙이 없으면 빈 배열이다(정상)."
+    )]
+    async fn list_mail_filters(&self) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::mail::list_mail_filters(&self.client)
+            .await
+            .map_err(map_domain_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "메일 자동분류(필터) 규칙을 만들거나 고친다(mail025A02/A03). field는 subject·mailfrom·rcptto·mailfromdomain·rcpttodomain 중 하나이고 content는 부분일치 문자열이다. to_mailbox는 걸린 메일을 보낼 메일함 **이름**(없으면 create_mailbox로 먼저 만든다). filter_seq를 주면 그 규칙을 수정하고 비우면 새로 만든다. ⚠️ **이미 받은 메일을 소급해 옮기지는 않는다** — 규칙은 앞으로 도착할 메일에만 걸린다. 지금 받은메일함에 있는 것까지 정리하려면 move_mail을 따로 쓸 것. 저장 후 목록을 재조회해 실제로 반영됐는지 확인한 결과를 `ok`로 돌려준다."
+    )]
+    async fn save_mail_filter(
+        &self,
+        Parameters(a): Parameters<SaveMailFilterArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::mail::save_mail_filter(
+            &self.client,
+            &a.field,
+            &a.content,
+            &a.to_mailbox,
+            a.filter_seq,
+        )
+        .await
+        .map_err(map_domain_err_ctx("자동분류 규칙 저장 실패"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
+
+    #[tool(
+        description = "메일 자동분류(필터) 규칙 1건을 삭제한다(mail025A04). filter_seq는 list_mail_filters의 `autoDivSeq`. **한 건씩만 지워진다** — 여러 건이면 반복 호출한다. 규칙을 지워도 그 규칙으로 이미 분류된 메일은 그 자리에 그대로 남는다."
+    )]
+    async fn delete_mail_filter(
+        &self,
+        Parameters(a): Parameters<DeleteMailFilterArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.ensure_session().await?;
+        let data = modules::mail::delete_mail_filter(&self.client, a.filter_seq)
+            .await
+            .map_err(map_domain_err_ctx("자동분류 규칙 삭제 실패"))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(data.to_string())]))
+    }
 }

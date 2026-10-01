@@ -529,6 +529,60 @@ def undo_person_group(mcp: Mcp, ref: dict, marker: str):
     return gone, "삭제됨(재조회 확인)" if gone else "삭제 호출은 됐으나 목록에 아직 남음"
 
 
+def undo_mail_filter(mcp: Mcp, ref: dict, marker: str):
+    """자동분류 규칙 삭제 — **우리가 만든 autoDivSeq 이면서 조건에 마커가 박혀 있을 때만.**
+
+    규칙은 사용자의 진짜 분류 설정과 같은 목록에 산다. seq 만 보고 지우면 번호가 밀렸을 때
+    남의 규칙을 지운다. 그래서 목록을 다시 읽어 **조건 문자열에 마커가 있는지** 확인한다.
+    """
+    seq = str(ref.get("seq"))
+    st = mcp.call("list_mail_filters")
+    if st[0] == "ERR":
+        return False, f"목록 조회 실패: {st[1]}"
+    found = next((r for r in st[1] if str(r.get("autoDivSeq")) == seq), None)
+    if found is None:
+        return True, f"autoDivSeq={seq} 이미 없음"
+    if marker not in str(found.get("check_data", "")):
+        return False, f"⚠️ autoDivSeq={seq} 조건에 마커가 없다 — 남의 규칙일 수 있어 손대지 않는다"
+    st = mcp.call("delete_mail_filter", filter_seq=int(seq))
+    if st[0] == "ERR":
+        return False, str(st[1])
+    return bool(st[1].get("ok")), f"autoDivSeq={seq} 삭제(재조회 확인)"
+
+
+def undo_moved_mail(mcp: Mcp, ref: dict, marker: str):
+    """옮겨둔 메일을 받은메일함으로 되돌린다 — **마커 이름의 메일함에 든 것만.**
+
+    ⚠️ 이 되돌리기가 메일함 삭제보다 **먼저** 끝나야 한다(PENDING 역순 정리가 그것을 보장한다).
+    메일이 든 채로 메일함을 지우면 그 메일까지 사라진다.
+    """
+    box = str(ref.get("box", ""))
+    if marker not in box:
+        return False, f"⚠️ '{box}' 에 마커가 없다 — 손대지 않는다"
+    st = mcp.call("list_mailbox_mails", mailbox=box, page_size=50)
+    if st[0] == "ERR":
+        return False, f"메일함 조회 실패: {st[1]}"
+    recs = st[1].get("Records") or []
+    if not recs:
+        return True, "되돌릴 메일 없음"
+    uids = ",".join(str(r["muid"]) for r in recs)
+    st = mcp.call("move_mail", uids=uids, to_mailbox="INBOX")
+    if st[0] == "ERR":
+        return False, str(st[1])
+    return bool(st[1].get("ok")), f"{len(recs)}건 INBOX 복귀(건수 확인)"
+
+
+def undo_mailbox(mcp: Mcp, ref: dict, marker: str):
+    """메일함 삭제 — **마커가 이름에 있을 때만.** 안이 비어 있어야 한다(undo_moved_mail 이 먼저)."""
+    name = str(ref.get("name", ""))
+    if marker not in name:
+        return False, f"⚠️ '{name}' 에 마커가 없다 — 손대지 않는다"
+    st = mcp.call("delete_mailbox", name=name)
+    if st[0] == "ERR":
+        return False, str(st[1])
+    return bool(st[1].get("ok")), f"'{name}' 삭제(재조회 확인)"
+
+
 UNDO = {
     "reservation": undo_reservation,
     "event": undo_event,
@@ -537,6 +591,9 @@ UNDO = {
     "mail": undo_mail,
     "mail_draft": undo_mail_draft,
     "approval": undo_approval,
+    "mail_filter": undo_mail_filter,
+    "moved_mail": undo_moved_mail,
+    "mailbox": undo_mailbox,
 }
 
 
@@ -1120,6 +1177,7 @@ def body(mcp: Mcp, fx: dict, marker: str):
         skip("list_mail_drafts", "save_mail_draft 실패 — 조회할 draft가 없음")
 
     person_group_scenario(mcp, marker)
+    mailbox_filter_scenario(mcp, marker)
     draft_send_scenario(mcp, marker)
     draft_carbon_copy_scenario(mcp, marker)
     draft_attachment_scenario(mcp, marker)
@@ -1128,6 +1186,127 @@ def body(mcp: Mcp, fx: dict, marker: str):
 
     for n, why in FORBIDDEN.items():
         skip(n, f"금지 — {why}")
+
+
+
+def mailbox_filter_scenario(mcp: Mcp, marker: str):
+    """메일함 생성 → 메일 이동 → 자동분류 규칙 → 가드 2종 확인 → 전부 되돌림.
+
+    ⚠️ **옮기는 메일은 Jira 알림만 고른다.** 사용자가 테스트 대상으로 지목한 메일이고,
+    되돌리기가 실패해도 업무에 지장이 없다. 받은메일함에 Jira 알림이 없으면 이동 계열을
+    건너뛴다 — 아무 메일이나 집어 옮기지 않는다.
+
+    ⚠️ **이동하면 muid 가 재부여된다.** 그래서 되돌릴 때 옛 muid 를 쓰지 않고,
+    `undo_moved_mail` 이 그 메일함을 다시 조회해 지금의 muid 로 옮긴다.
+
+    가드 2종은 실패해야 정상인 호출이다:
+      ① 규칙이 가리키는 메일함은 삭제가 막힌다(`bFilter`) — 막히지 않으면 규칙이 고아가 된다.
+      ② 모르는 `field` 값은 호출 전에 거부된다 — 통과시키면 "저장은 됐는데 아무것도 안 걸리는"
+         규칙이 조용히 생긴다(아마란스는 모르는 파라미터를 에러 없이 버린다).
+    """
+    box = f"{marker}autodiv"
+    MOVE_TOOLS = ("move_mail", "list_mailbox_mails")
+    FILTER_TOOLS = ("save_mail_filter", "list_mail_filters", "delete_mail_filter")
+
+    # ① 메일함 생성 — 뒤따르는 모든 점검의 토대다.
+    st = mcp.call("create_mailbox", name=box)
+    if st[0] == "ERR":
+        R.append(("FAIL", "create_mailbox", st[1]))
+        for t in MOVE_TOOLS + FILTER_TOOLS + ("delete_mailbox",):
+            skip(t, "메일함 생성 실패로 이어지는 점검 불가")
+        return
+    made = str(st[1].get("name") or box)
+    bx = track("mailbox", {"name": made}, f"메일함 '{made}' 삭제(delete_mailbox)")
+    R.append((("PASS" if st[1].get("ok") else "FAIL"), "create_mailbox",
+              f"'{made}' seq={st[1].get('mbox_seq')} · 목록 재조회 확인"))
+
+    # ② 이동 — Jira 알림 메일만.
+    st = mcp.call("list_mail_inbox")
+    recs = (st[1].get("Records") or []) if st[0] != "ERR" else []
+    jira = [r for r in recs if "[Jira]" in str(r.get("subject", ""))][:2]
+    if not jira:
+        for t in MOVE_TOOLS:
+            skip(t, "받은메일함에 Jira 알림 메일이 없어 이동 점검 생략(아무 메일이나 옮기지 않는다)")
+    else:
+        uids = ",".join(str(r["muid"]) for r in jira)
+        mv = track("moved_mail", {"box": made}, f"'{made}' 의 메일을 INBOX 로 복귀(move_mail)")
+        st = mcp.call("move_mail", uids=uids, to_mailbox=made)
+        if st[0] == "ERR":
+            R.append(("FAIL", "move_mail", st[1]))
+            untrack(mv)
+            skip("list_mailbox_mails", "이동 실패로 확인 대상 없음")
+        else:
+            R.append((("PASS" if st[1].get("ok") else "FAIL"), "move_mail",
+                      f"{st[1].get('moved')}건 → '{made}' · "
+                      f"건수 {st[1].get('total_before')}→{st[1].get('total_after')}"))
+            # 옮긴 자리에서 실제로 보이는가 + muid 가 바뀌었는가(문서화한 성질).
+            st = mcp.call("list_mailbox_mails", mailbox=made, page_size=50)
+            if st[0] == "ERR":
+                R.append(("FAIL", "list_mailbox_mails", st[1]))
+            else:
+                got = st[1].get("Records") or []
+                new_uids = ",".join(str(x["muid"]) for x in got)
+                R.append((("PASS" if len(got) == len(jira) and new_uids != uids else "FAIL"),
+                          "list_mailbox_mails",
+                          f"{len(got)}건(옮긴 {len(jira)}건) · muid 재부여 {uids}→{new_uids}"))
+
+    # ③ 자동분류 규칙 — 조건에 마커를 박아 사용자의 진짜 규칙과 구분한다.
+    st = mcp.call("save_mail_filter", field="subject", content=f"{marker}제목조건", to_mailbox=made)
+    if st[0] == "ERR":
+        R.append(("FAIL", "save_mail_filter", st[1]))
+        for t in ("list_mail_filters", "delete_mail_filter"):
+            skip(t, "규칙 생성 실패로 이어지는 점검 불가")
+    else:
+        fseq = (st[1].get("filter") or {}).get("autoDivSeq")
+        fl = track("mail_filter", {"seq": fseq}, f"자동분류 규칙 autoDivSeq={fseq} 삭제")
+        R.append((("PASS" if st[1].get("ok") and fseq else "FAIL"), "save_mail_filter",
+                  f"생성 autoDivSeq={fseq} · 목록 재조회 확인"))
+
+        st = mcp.call("list_mail_filters")
+        R.append((("PASS" if st[0] != "ERR" and any(str(r.get("autoDivSeq")) == str(fseq) for r in st[1]) else "FAIL"),
+                  "list_mail_filters",
+                  st[1] if st[0] == "ERR" else f"{len(st[1])}건 · 방금 만든 규칙 발견"))
+
+        # 수정 — 필드까지 바뀌는지. 응답만 보지 않고 재조회 결과로 판정한다.
+        st = mcp.call("save_mail_filter", field="mailfromdomain",
+                      content=f"{marker}example.invalid", to_mailbox=made, filter_seq=fseq)
+        f = (st[1].get("filter") or {}) if st[0] != "ERR" else {}
+        R.append((("PASS" if st[0] != "ERR" and st[1].get("ok") and f.get("fild_name") == "mailfromdomain" else "FAIL"),
+                  "save_mail_filter(수정)",
+                  st[1] if st[0] == "ERR" else f"fild_name={f.get('fild_name')} check_data={f.get('check_data')}"))
+
+        # 가드 ① — 모르는 field 는 호출 전에 막아야 한다.
+        st = mcp.call("save_mail_filter", field="from", content="x", to_mailbox=made)
+        R.append((("PASS" if st[0] == "ERR" else "FAIL"), "save_mail_filter(모르는 field 거부)",
+                  str(st[1])[:90] if st[0] == "ERR" else "⚠️ 모르는 field 로 규칙이 저장됐다"))
+
+        # 가드 ② — 규칙이 가리키는 메일함은 삭제가 막혀야 한다.
+        st = mcp.call("delete_mailbox", name=made)
+        blocked = st[0] == "ERR" and "자동분류" in str(st[1])
+        R.append((("PASS" if blocked else "FAIL"), "delete_mailbox(규칙 참조 중 거부)",
+                  str(st[1])[:90] if st[0] == "ERR" else "⚠️ 규칙이 걸린 메일함이 삭제됐다 — 규칙이 고아가 된다"))
+
+        # 규칙 정리 = delete_mail_filter 점검을 겸한다(person_group 과 같은 규약).
+        ok, note = undo_mail_filter(mcp, fl["ref"], marker)
+        R.append((("PASS" if ok else "FAIL"), "delete_mail_filter", note))
+        if ok:
+            untrack(fl)
+
+    # 가드 ③ — 시스템 메일함은 어떤 경우에도 삭제되지 않아야 한다.
+    st = mcp.call("delete_mailbox", name="INBOX")
+    R.append((("PASS" if st[0] == "ERR" else "FAIL"), "delete_mailbox(시스템 메일함 거부)",
+              str(st[1])[:90] if st[0] == "ERR" else "⚠️ 받은메일함이 삭제됐다"))
+
+    # ④ 메일 복귀 → 메일함 삭제. 순서가 뒤바뀌면 메일이 함께 사라진다.
+    for entry in [e for e in list(PENDING) if e["kind"] == "moved_mail"]:
+        ok, note = undo_moved_mail(mcp, entry["ref"], marker)
+        R.append((("PASS" if ok else "FAIL"), "move_mail(INBOX 복귀)", note))
+        if ok:
+            untrack(entry)
+    ok, note = undo_mailbox(mcp, bx["ref"], marker)
+    R.append((("PASS" if ok else "FAIL"), "delete_mailbox", note))
+    if ok:
+        untrack(bx)
 
 
 def draft_send_scenario(mcp: Mcp, marker: str):

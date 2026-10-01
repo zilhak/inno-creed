@@ -155,6 +155,74 @@ pub struct DownloadMailAttachmentArgs {
     pub out_path: String,
 }
 
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MoveMailArgs {
+    /// 옮길 메일 muid 목록(콤마 구분). list_mail_inbox/search 결과의 muid.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
+    pub uids: String,
+    /// 받을 메일함 **이름**. 시스템 메일함(INBOX·SENT·DRAFTS·TRASH·SPAM)과
+    /// 사용자가 만든 메일함 둘 다 이름으로 지정한다 — seq는 계정마다 달라 쓰지 않는다.
+    /// 이름은 list_mailboxes 결과의 name/fullname과 맞춘다.
+    pub to_mailbox: String,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ListMailboxMailsArgs {
+    /// 조회할 메일함 **이름**(list_mailboxes의 name/fullname). 시스템 메일함
+    /// (INBOX·SENT·DRAFTS·TRASH·SPAM)과 사용자가 만든 메일함 둘 다 된다.
+    pub mailbox: String,
+    /// 페이지 번호(1부터). 기본 1.
+    #[serde(default)]
+    pub page: Option<i64>,
+    /// 한 페이지 건수. 기본 20.
+    #[serde(default)]
+    pub page_size: Option<i64>,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct CreateMailboxArgs {
+    /// 만들 메일함 이름.
+    pub name: String,
+    /// 상위 메일함 이름(선택). 비우면 최상위. **1단계 하위까지만** 만들 수 있다.
+    #[serde(default)]
+    pub parent: Option<String>,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DeleteMailboxArgs {
+    /// 삭제할 메일함 이름. ⚠️ 안에 든 메일도 함께 사라지며 되돌릴 수 없다.
+    pub name: String,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SaveMailFilterArgs {
+    /// 조건을 검사할 필드. `subject`(제목) · `mailfrom`(보낸사람 주소) ·
+    /// `rcptto`(받는사람 주소) · `mailfromdomain`(보낸사람 도메인) ·
+    /// `rcpttodomain`(받는사람 도메인) 중 하나. 다른 값은 거부한다.
+    pub field: String,
+    /// 그 필드에 들어 있으면 걸리는 문자열(부분일치). 예: 제목에 `[Jira]`, 도메인에 `innogrid.com`.
+    pub content: String,
+    /// 걸린 메일을 보낼 메일함 **이름**. 먼저 create_mailbox로 만들어 둔다.
+    pub to_mailbox: String,
+    /// 고칠 규칙의 autoDivSeq(선택). 주면 그 규칙을 수정하고, 비우면 새로 만든다.
+    /// 값은 list_mail_filters 결과의 `autoDivSeq`.
+    #[serde(default)]
+    pub filter_seq: Option<i64>,
+}
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DeleteMailFilterArgs {
+    /// 지울 규칙의 autoDivSeq(list_mail_filters 결과). 여러 건이면 한 건씩 반복 호출한다.
+    pub filter_seq: i64,
+}
+
 // 파싱 단계에서 거부하므로 세션 확보·첨부 업로드·발송 모두 실행되지 않는다.
 fn deserialize_body<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     let body = Option::<String>::deserialize(d)?;

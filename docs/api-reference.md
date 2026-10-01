@@ -249,6 +249,12 @@
 | `mail002A05` | 메일 삭제(휴지통) | `delete_mails` |
 | `mail000A03` | 메일함별 미읽음·전체 카운트 + 계정 전체 집계 | `mailbox_counts` |
 | `mail002A15` | 메일 플래그 변경(`type:"unseen"` = 읽지 않음으로) | `mark_mail_unread` |
+| `mail002A08` | 메일 이동(메일함 간) | `move_mails` |
+| `mail001A18` → `mail001A05` | 메일함 생성(중복검사 후) | `create_mailbox` |
+| `mail001A17` → `mail001A06` | 메일함 삭제(사전검사 후 실행) | `delete_mailbox` |
+| `mail025A01` | 자동분류(필터) 규칙 목록 | `list_mail_filters` |
+| `mail025A02` / `mail025A03` | 자동분류 규칙 생성 / 수정 | `save_mail_filter` |
+| `mail025A04` | 자동분류 규칙 삭제(**한 건씩**) | `delete_mail_filter` |
 
 - 특이점: 메일 API는 body에 **`mainApiCode`**(예 `"mail003A01"`)를 명시해 라우팅(다른 모듈은 URL만). 메일 식별자 = `muid`.
 - ⚠️ **메일함 `mboxSeq`는 계정마다 다르다 — 코드에 박지 말고 `mail000A01`(`list_mailboxes`) 응답에서 이름으로 찾을 것**(`mbox_seq(c, "INBOX")`).
@@ -691,6 +697,50 @@ POST /mail/mail002A01   body(JSON): { uid: <muid> }
 ```
 
 - 실증(MCP 왕복): 임시 PNG/TXT를 `attachments`로 자기 앞 발송 → `read_mail`에 첨부 2개 도착 → `download_mail_attachment`로 되받아 **원본과 바이트 동일**.
+
+### 메일 이동 · 메일함 관리 · 자동분류 (mail002A08 · mail001* · mail025*) — 실측 2026-10-01
+
+전수 조사와 왕복 로그는 `.claude-workspace/analyze/07-mail-module.md` "메일함 관리 · 자동분류 실측" 절.
+여기에는 **호출자가 반드시 알아야 할 것**만 적는다.
+
+**이동** — `POST /mail/mail002A08`. `targetbox`(시스템 메일함 이름)와 `targetSeq`(사용자 메일함 seq)는
+**택일**이다. 쓰지 않는 쪽은 빈 문자열로 둔다.
+
+```json
+{"uids":"<muid,csv>", "targetbox":"",      "targetSeq":30301}   // 사용자 메일함
+{"uids":"<muid,csv>", "targetbox":"INBOX", "targetSeq":""}      // 시스템 메일함(스팸 해제도 이 경로)
+```
+
+⚠️ **이동하면 muid가 재부여된다** — 옛 muid로는 그 메일을 더 못 찾는다. 그래서 `move_mails`의
+판정은 muid 추적이 아니라 **대상 메일함 전체 건수의 증가분**이 한다. 같은 순간 새 메일이
+도착하면 증가분이 어긋날 수 있어 그건 실패가 아니라 "확인 못 함"으로 돌려준다(§7.1 3분법).
+증가가 **아예 없으면** 실패다.
+
+**메일함 생성** — 이름은 반드시 **`boxName`**으로 보낸다. `mboxLang`으로만 주면 서버가 `(1)`
+접미사를 붙인다. **중복 회피가 아니다** — 세상에 없는 난수 이름에도, `mail001A18` 중복검사가
+`code:"0"`(사용 가능)을 준 직후에도 똑같이 붙었다(실측). 웹 UI가 두 형태를 다 쓰는 것은 경로가
+둘이기 때문이다(트리의 [추가]는 "새메일함"으로 먼저 만들고 이름을 나중에 고친다). 그래도
+생성 결과의 이름·seq는 **응답에서 받아 쓴다**.
+
+**메일함 삭제** — ⚠️ **`mail001A17`은 이름과 달리 삭제가 아니라 사전검사다.** `resultCode:0` ·
+`msg:"SUCCESS"`를 돌려주면서 메일함은 그대로 남는다. 봐야 할 것은 `resultData.bFilter`:
+
+| `bFilter` | 뜻 | 다음 행동 |
+|---|---|---|
+| `true` | 그 메일함을 가리키는 자동분류 규칙이 있다 | 규칙을 먼저 지운다(`mail025A04`) |
+| `false` | 삭제해도 된다 | **`mail001A06`을 따로 불러야** 실제로 지워진다 |
+
+성공 코드만 보고 "지워졌다"고 판정하면 어긋난다. `delete_mailbox`는 `bFilter:true`를 오류로
+바꿔 알려주고, 시스템 메일함(INBOX·SENT·DRAFTS·TRASH·SPAM)은 호출 전에 거부한다.
+
+**자동분류 규칙** — 조건 필드 `fild_name`(서버 철자가 그렇다)은 5종뿐이다:
+`subject` · `mailfrom` · `rcptto` · `mailfromdomain` · `rcpttodomain`.
+⚠️ 모르는 값을 보내면 **조용히 무시될 수 있다**(아마란스 고질 — "호출자 함정" 절 참조). 그래서
+`save_mail_filter`는 목록에 없는 값을 **호출 전에 거부**한다. 삭제(`mail025A04`)는 일괄이 아니라
+**한 건씩**이다 — 웹 화면도 체크된 행을 루프 돌며 보낸다.
+
+⚠️ 규칙은 **앞으로 도착할 메일에만** 걸린다. 이미 받은 메일을 소급 분류하지 않으므로, 기존
+메일까지 정리하려면 `move_mails`를 따로 쓴다.
 
 ### 메일 삭제 (mail002A05)
 

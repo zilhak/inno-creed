@@ -93,9 +93,12 @@ async fn main() -> Result<()> {
         let spec = args.get(2).ok_or_else(|| anyhow!("usage: probe submit @args.json"))?;
         let txt = if let Some(f) = spec.strip_prefix('@') { std::fs::read_to_string(f)? } else { spec.clone() };
         let a: Value = serde_json::from_str(&txt)?;
-        let client = GwClient::new(creds::from_browser().ok());
+        let client = std::sync::Arc::new(GwClient::new(creds::from_browser().ok()));
         client.ensure_session().await?;
         let g = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let strs = |k: &str| a.get(k).and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
+            .unwrap_or_default();
         let out = inno_creed::modules::approval_submit::submit_approval(
             &client,
             a.get("form_id").and_then(|v| v.as_i64()).unwrap_or(0),
@@ -105,7 +108,9 @@ async fn main() -> Result<()> {
             &g("bind_data_json"),
             &g("doc_contents_html"),
             &g("numbering_id"),
-            &a.get("attachments").and_then(|v| v.as_array()).map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>()).unwrap_or_default(),
+            &strs("attachments"),
+            &strs("cc_emp_seqs"),
+            &strs("cc_dept_ids"),
         )
         .await;
         match out {

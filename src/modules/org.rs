@@ -186,7 +186,12 @@ pub async fn dept_tree_nested(c: &GwClient, scope: &str) -> Result<Value> {
 }
 
 /// 부서별 사원 목록 — gw102A02. `dept_id`(deptTree의 deptId)의 사원 전원 + 직책(dutyName).
-pub async fn dept_members(c: &GwClient, dept_id: &str) -> Result<Value> {
+/// 부서 사원 목록 **서버 원본 그대로**(gw102A02 응답 배열). 가공본은 `dept_members`.
+///
+/// 가공본이 버리는 필드가 필요한 곳을 위해 둔다 — 전자결재 수신참조 노드는
+/// `positionCode`(직급코드)·`workStatus`·`compSeq`/`bizSeq`까지 요구하는데
+/// `dept_members`의 요약에는 그것들이 없다(`approval_submit::build_cc_nodes`).
+pub async fn dept_members_raw(c: &GwClient, dept_id: &str) -> Result<Vec<Value>> {
     let body = json!({
         "selectedId": dept_id, "orgGubun": "d",
         "popupType": "main", "selectedType": "tree",
@@ -196,9 +201,13 @@ pub async fn dept_members(c: &GwClient, dept_id: &str) -> Result<Value> {
         "isGridListDisplayOption": "0", "isLoginIdOption": "1"
     });
     let data = c.call("/gw/APIHandler/gw102A02", &body).await?;
-    let arr = data
-        .as_array()
-        .ok_or_else(|| anyhow!("gw102A02 응답이 배열이 아님"))?;
+    data.as_array()
+        .cloned()
+        .ok_or_else(|| anyhow!("gw102A02 응답이 배열이 아님"))
+}
+
+pub async fn dept_members(c: &GwClient, dept_id: &str) -> Result<Value> {
+    let arr = dept_members_raw(c, dept_id).await?;
     let members: Vec<Value> = arr
         .iter()
         .map(|m| {

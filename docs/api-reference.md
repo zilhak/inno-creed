@@ -1010,6 +1010,15 @@ POST /eap/eap110A06   상신 → resultData.result = 신규 docId
 
   > `eap110A03`은 **부작용 없는 읽기 콜**이다. 상신 전에 "이 라인으로 올리면 누구에게 가는가"를 미리 확인하는 용도로 쓸 수 있다(`tests/live`의 상신 시나리오가 이 방식으로 사전 가드를 건다).
 
+- **임의 수신참조는 `pRefer`에 노드를 더해 싣는다**(`cc_emp_seqs`/`cc_dept_ids` → `approval_submit::build_cc_nodes`). 양식필수(`m_Refer` 패스스루) **뒤에 append**하고 `doc_line_m_seq`/`seq`를 이어 매기며, `modifyDocInfo.appdocReceiveList`에 `{receive_div:"10", org_div, org_id}` 1행을 함께 보낸다. `must_yn:"0"`으로 보내면 "양식필수 아님"으로 저장된다.
+
+  - **저장 확인은 `eap110A03`에 `docID=<저장된 문서>`를 주고** `resultMap.hidRefer`(원본 노드, 부서는 전개 전)·`valRefer`(사람이 읽는 표기)를 본다. 부작용 없는 읽기다. ⚠️ 같은 응답의 `m_Refer`/`kyuljaeResult`는 이때도 **양식 정의**라 저장본이 아니다.
+  - ⚠️ **`read_approval`의 `receiveDiv:"10"`은 판정에 쓸 수 없다** — 수신참조가 아닌 사람이 섞여 나온다(실측: 양식필수 전개 10명인 문서에 31명).
+  - ⛔ **양식필수 수신참조는 건드리지 않는다 — 제거 기능은 두지 않는다**(설계 방침). 양식필수는 "이 양식의 문서는 그들이 봐야 한다"는 회사 규칙이 양식에 박힌 것이라 기안자가 뺄 대상이 아니고, 서버도 a03 진입마다 재주입한다. 미해결 과제가 아니다.
+  - 노드 재료는 조직도 **원본**(`org::dept_members_raw`)이어야 한다(요약본에 `positionCode`/`workStatus`/`compSeq`가 없다).
+  - ℹ️ **수신참조는 알림을 보내지 않는다** — 그 사람의 수신참조함 목록에 문서가 보일 뿐이다(알림은 결재선에 든 사람에게만 간다).
+  - 실증: 사람·부서 추가 모두 e2e(연차36, 2026-10-02 — 상신 → `hidRefer` 저장 확인 → 대상 부서원의 수신참조함 도달 확인 → 취소. `.claude-workspace/approval-analysis/07-eapproval-api-capture.md` §12).
+
 - **근태 양식(`form_d_tp`가 `HP_HPD0110_*`)은 상신 전에 HP 연동 5콜이 선행돼야 한다.** 빠뜨리면 `eap110A06`이 `resultCode 2099`로 실패한다:
 
   ```

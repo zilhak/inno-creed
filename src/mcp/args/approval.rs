@@ -177,6 +177,23 @@ pub struct SubmitApprovalArgs {
     #[serde(deserialize_with = "super::flex_string")]
     #[schemars(schema_with = "super::flex_str_schema")]
     pub numbering_id: String,
+    /// **수신참조로 더할 사람**의 empSeq 목록(선택). `find_person`/`person_group`이 주는 값.
+    /// 양식필수 수신참조(서버가 자동으로 붙이는 인사총무팀 등) **뒤에 덧붙는다** — 그것들을
+    /// 없애거나 대체하지 않는다. 이미 양식필수에 들어 있는 사람은 건너뛰고 응답 `cc.skipped`에 적는다.
+    /// ℹ️ **수신참조는 알림을 보내지 않는다** — 그 사람의 수신참조함 목록에 문서가 보일 뿐이다
+    /// (알림은 결재선에 든 사람에게만 간다). 그래도 문서가 그들에게 열람 가능해지므로 대상은
+    /// 사용자에게 확인받고 넣을 것. 상신 뒤 실제로 실렸는지는 도구가 재조회해 `cc.verified`로 알려준다.
+    #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string_vec")]
+    #[schemars(schema_with = "super::flex_str_vec_schema")]
+    pub cc_emp_seqs: Vec<String>,
+    /// **수신참조로 더할 부서**의 deptId 목록(선택). `org_chart`/`find_person`의 deptId.
+    /// 부서를 넣으면 **그 부서원 전원**의 수신참조함에 문서가 뜬다 — 인원을 확인하고 쓸 것.
+    /// 부서도 `cc.verified` 판정 대상이다(저장본 `hidRefer`에 전개 전 원본으로 남아 있다).
+    #[serde(default)]
+    #[serde(deserialize_with = "super::flex_string_vec")]
+    #[schemars(schema_with = "super::flex_str_vec_schema")]
+    pub cc_dept_ids: Vec<String>,
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]

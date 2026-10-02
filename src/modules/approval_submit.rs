@@ -21,6 +21,8 @@
 //!    날짜, doc_sts(10/20), eap prep 콜, 쿠키·토큰·헤더·전송계층 지문, 포털로그인(gw050B01) 세션 — 전부 실측 반증.
 //!    HP↔eap 링크도 "서버가 empCd+atDt로 매칭"이 아니라 **linkKey↔appSq 명시 바인딩**이다(실측으로 확정).
 
+use std::sync::Arc;
+
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
@@ -538,10 +540,13 @@ async fn check_line_before_submit(c: &GwClient, line_id: i64) -> Result<()> {
 /// - `doc_contents_html`: 표시용 본문 HTML(raw). 내부에서 encodeURIComponent로 인코딩해 전송.
 /// - `numbering_id`: 채번 규칙(기본 "1001").
 ///
+/// - `cc_emp_seqs`/`cc_dept_ids`: **기안자가 직접 더하는 수신참조**(사람 empSeq / 부서 deptId).
+///   양식필수 수신참조 뒤에 덧붙는다. 비우면 종래대로 양식필수만 실린다.
+///
 /// 양식필수 합의자/수신참조는 eap110A03에서 서버가 해석한 것을 자동 병합한다.
 #[allow(clippy::too_many_arguments)]
 pub async fn submit_approval(
-    c: &GwClient,
+    c: &Arc<GwClient>,
     form_id: i64,
     doc_title: &str,
     line_id: i64,
@@ -550,6 +555,8 @@ pub async fn submit_approval(
     doc_contents_html: &str,
     numbering_id: &str,
     attachments: &[String],
+    cc_emp_seqs: &[String],
+    cc_dept_ids: &[String],
 ) -> Result<Value> {
     // ── 결재선 사전 점검 — HP 근태 레코드를 만들기 **전에** 막는다 ──────────────
     // a03 응답(`kyuljaeResult`)에 기대지 않는 이유: 근태 양식은 양식필수 수신참조·시행자가
@@ -716,8 +723,13 @@ pub async fn submit_approval(
     let line_nodes: Vec<Value> = kyuljae.clone();
 
     // ── 3) pRefer = 수신참조, pOper = 시행자 — a03 원본 패스스루(+org_div) ──────
-    let refer_nodes: Vec<Value> = m_refer.iter().map(norm_participant).collect();
+    let mut refer_nodes: Vec<Value> = m_refer.iter().map(norm_participant).collect();
     let oper_nodes: Vec<Value> = m_oper.iter().map(norm_participant).collect();
+
+    // 기안자가 직접 더한 수신참조를 양식필수 뒤에 잇는다(순번은 이어서 매긴다).
+    // 이미 양식필수로 들어 있는 대상은 건너뛴다 — 같은 사람이 두 번 실리면 서버 거동이 미지수다.
+    let cc_added = build_cc_nodes(c, cc_emp_seqs, cc_dept_ids, &refer_nodes).await?;
+    refer_nodes.extend(cc_added.added.iter().cloned());
 
     // ── 5) modifyDocInfo compact 뷰 ──────────────────────────────────────────
     let line_compact: Vec<Value> = line_nodes
@@ -802,6 +814,10 @@ pub async fn submit_approval(
     let new_doc_id = submitted_doc_id(&d).ok_or_else(|| {
         anyhow!("상신(eap110A06)이 docId를 주지 않았다 — resultData.result 없음/빈값. 서버 응답: {d}")
     })?;
+
+    // 더한 수신참조가 **실제로 실렸는지 되읽어 확인한다.** 아마란스는 받아들이지 않은 항목을
+    // 조용히 버리므로(모르는 파라미터 무시) 상신 성공만으로는 반영을 단정할 수 없다.
+    let cc_report = cc_readback(c, &new_doc_id, form_id, &cc_added).await;
     Ok(json!({
         "kind": "approvalSubmitted",
         "ok": true,
@@ -810,8 +826,105 @@ pub async fn submit_approval(
         "title": doc_title,
         "lineCount": line_nodes.len(),
         "referCount": refer_nodes.len(),
+        "cc": cc_report,
         "note": "상신 성공(docId 발급 확인). 취소는 cancel_approval(docId, formId) — 상신 직후는 doc_sts=30이라 formId가 필요하다. 근태 양식은 create→GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup(HP interlock 등록) 후 eap110A06으로 상신한다. 등록 누락 시 2099(HP_HPD0110)."
     }))
+}
+
+/// 더한 수신참조가 문서에 **실제로 저장됐는지** 되읽어 확인한다.
+///
+/// 소스는 `eap110A03`에 **저장된 문서의 docID를 주고** 받는 `resultMap.hidRefer` — 그 문서에
+/// 실린 수신참조 목록 그 자체다(`valRefer`는 같은 것의 사람이 읽는 표기). `docID:0`으로 부를 때와
+/// 달리 양식 정의가 아니라 저장본이 오고, 부서는 전개되기 전 원본(`div:"d"`, `org_id`=deptId)으로
+/// 남아 있어 **사람과 부서를 모두 판정할 수 있다**. 열람 부작용은 없다(상신 팝업을 여는 것과 같다).
+///
+/// ⚠️ `read_approval`의 `receiveDiv:"10"`을 쓰지 않는 이유 — 그 목록에는 수신참조가 아닌
+/// 사람도 섞여 나오는 것을 실측했다(결재자가 10으로 보였다). 판정에 쓰면 위양성이 난다.
+///
+/// 확인에 실패해도 에러로 올리지 않는다 — 상신은 이미 끝났고 되돌릴 수 없으므로, 여기서 할 일은
+/// "확인됐는지"를 정직하게 전하는 것뿐이다(`verified:false`는 반영 실패일 수도, 확인 실패일 수도 있다).
+async fn cc_readback(c: &GwClient, doc_id: &Value, form_id: i64, plan: &CcPlan) -> Value {
+    if plan.persons.is_empty() && plan.depts.is_empty() && plan.skipped.is_empty() {
+        return Value::Null;
+    }
+    let mut out = json!({
+        "requestedPersons": plan.persons,
+        "requestedDepts": plan.depts,
+        "skipped": plan.skipped,
+    });
+    let put = |o: &mut Value, k: &str, v: Value| {
+        if let Some(m) = o.as_object_mut() {
+            m.insert(k.to_string(), v);
+        }
+    };
+    if plan.persons.is_empty() && plan.depts.is_empty() {
+        put(&mut out, "verified", Value::Null);
+        put(&mut out, "note", json!("요청한 수신참조가 모두 양식필수와 겹쳐 더한 것이 없다."));
+        return out;
+    }
+
+    let fail = |mut out: Value, why: String| {
+        if let Some(m) = out.as_object_mut() {
+            m.insert("verified".into(), json!(false));
+            m.insert("note".into(), json!(why));
+        }
+        out
+    };
+    let a03 = match c
+        .call(
+            "/eap/eap110A03",
+            &json!({
+                "docID": doc_id, "formID": form_id.to_string(), "approkey": gen_approkey(),
+                "appLineId": "", "draftTp": "", "reDraft": "", "docType": "",
+                "doc_auth": 0, "pageCode": "UBAP001"
+            }),
+        )
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return fail(out, format!(
+                "상신은 됐으나 수신참조 저장을 확인하지 못했다(문서 재조회 실패: {e}).                  아마란스 웹에서 문서의 수신참조를 직접 확인할 것."
+            ))
+        }
+    };
+    let Some(saved_nodes) = a03
+        .get("resultMap")
+        .and_then(|m| m.get("hidRefer"))
+        .and_then(|v| v.as_array())
+    else {
+        return fail(out, "상신은 됐으나 수신참조 저장을 확인하지 못했다(a03 응답에 hidRefer 없음). 아마란스 웹에서 직접 확인할 것.".into());
+    };
+    let saved: std::collections::HashSet<(String, String)> = saved_nodes
+        .iter()
+        .map(|n| (jstr(n.get("div")), jstr(n.get("org_id"))))
+        .collect();
+
+    let missing_p: Vec<Value> = plan
+        .persons
+        .iter()
+        .filter(|p| !saved.contains(&("m".to_string(), jstr(p.get("empSeq")))))
+        .cloned()
+        .collect();
+    let missing_d: Vec<Value> = plan
+        .depts
+        .iter()
+        .filter(|d| !saved.contains(&("d".to_string(), jstr(d.get("deptId")))))
+        .cloned()
+        .collect();
+
+    let ok = missing_p.is_empty() && missing_d.is_empty();
+    put(&mut out, "verified", json!(ok));
+    put(&mut out, "missingPersons", json!(missing_p));
+    put(&mut out, "missingDepts", json!(missing_d));
+    // 사람이 읽는 확인용 — 문서에 실린 수신참조 전체(양식필수 포함)를 서버 표기 그대로.
+    put(&mut out, "savedOnDoc", a03.get("resultMap").and_then(|m| m.get("valRefer")).cloned().unwrap_or(Value::Null));
+    put(&mut out, "note", json!(if ok {
+        "더한 수신참조가 문서에 저장된 것을 재조회로 확인했다(eap110A03 hidRefer). savedOnDoc이 문서에 실린 수신참조 전체다."
+    } else {
+        "⚠️ 더한 수신참조 중 일부가 문서에 저장되지 않았다 — 그 대상은 이 문서를 받지 못한다. savedOnDoc에서 실제로 실린 것을 확인하고, 필요하면 아마란스 웹에서 직접 추가할 것."
+    }));
+    out
 }
 
 /// 상신 응답(`eap110A06`의 resultData)에서 새 docId를 꺼낸다. **성공 판정이 곧 이것이다** —
@@ -878,6 +991,213 @@ pub(crate) fn norm_participant(src: &Value) -> Value {
         o.insert("org_div".into(), json!(div));
     }
     n
+}
+
+/// 기안자가 직접 더하는 수신참조의 조립 결과.
+#[derive(Default)]
+pub(crate) struct CcPlan {
+    /// `pRefer`에 덧붙일 노드.
+    pub added: Vec<Value>,
+    /// 요청한 사람 `{empSeq,name}` — 상신 뒤 read-back 판정 대상.
+    pub persons: Vec<Value>,
+    /// 요청한 부서 `{deptId,name}`.
+    pub depts: Vec<Value>,
+    /// 이미 양식필수로 들어 있어 건너뛴 대상 `{kind,id}`.
+    pub skipped: Vec<Value>,
+}
+
+/// 기안자가 **직접 더하는** 수신참조(`pRefer`) 노드를 조직도로 조립한다.
+///
+/// 양식필수 수신참조는 서버(a03 `m_Refer`)가 주는 대로 싣고, 이 함수가 만드는 것은 그 뒤에
+/// **덧붙는** 임의 참조자다.
+///
+/// ⛔ **양식필수 수신참조를 빼는 기능은 두지 않는다(설계 방침, 2026-10-02).** 양식필수란 "이 양식의
+/// 문서는 그들이 봐야 한다"는 회사 규칙이 양식에 박힌 것이라 기안자가 임의로 뺄 대상이 아니다.
+/// 서버도 그렇게 동작한다 — `a03`가 진입할 때마다 주입하므로 payload에서 지워도 되살아난다.
+/// 즉 **막혀서 못 하는 것이 아니라 하지 않는 것이 맞다**. "미해결 과제"로 되살리지 말 것. 노드 모양은 브라우저 상신 캡처(`captures/annual-half-am_eap110A06.json`
+/// 의 `pRefer`)와 같은 필드 구성으로 맞추되, 양식이 강제한 것이 아니므로 `must_yn:"0"`으로 둔다.
+///
+/// - `emp_seqs`: 사람 — `div:"m"`, `user_id`=`org_id`=empSeq, `dept_line:false`
+/// - `dept_ids`: 부서 — `div:"d"`, `user_id:"0"`, `org_id`=deptId, `deptline_yn:"1"`
+///   (등록되면 서버가 그 부서원 전원을 수신참조로 전개한다)
+/// - `existing`: 이미 실린 양식필수 노드. 순번(`doc_line_m_seq`)을 그 다음부터 매기고,
+///   같은 대상이 거기 있으면 건너뛴다(같은 사람이 두 번 실릴 때의 거동은 미지수다).
+///
+/// ⛔ **해석 못 한 대상은 조용히 빠뜨리지 않고 에러로 올린다** — 참조자가 말없이 누락되면
+/// 기안자는 보냈다고 믿는데 상대는 못 받고, 그게 되돌릴 수 없는 상신 뒤에 드러난다.
+pub(crate) async fn build_cc_nodes(
+    c: &Arc<GwClient>,
+    emp_seqs: &[String],
+    dept_ids: &[String],
+    existing: &[Value],
+) -> Result<CcPlan> {
+    let mut plan = CcPlan::default();
+    let persons = dedup_trimmed(emp_seqs);
+    let depts = dedup_trimmed(dept_ids);
+    if persons.is_empty() && depts.is_empty() {
+        return Ok(plan);
+    }
+
+    // 이미 실린 대상 — (div, org_id). 부서는 org_id=deptId, 사람은 org_id=empSeq다.
+    let taken: std::collections::HashSet<(String, String)> = existing
+        .iter()
+        .map(|n| (jstr(n.get("div")), jstr(n.get("org_id"))))
+        .collect();
+    let mut seq = existing.len();
+
+    // ── 사람 ───────────────────────────────────────────────────────────────
+    if !persons.is_empty() {
+        // 명부(30분 캐시)로 empSeq → 소속 부서를 찾고, 그 부서의 **원본** 사원 레코드를 쓴다.
+        // 명부 요약본에는 노드가 요구하는 positionCode/workStatus/compSeq가 없다.
+        let roster = crate::modules::org::roster(c).await?;
+        let mut raw_cache: std::collections::HashMap<String, Vec<Value>> = Default::default();
+
+        for emp in &persons {
+            let found = roster.iter().find(|m| jstr(m.get("empSeq")) == *emp);
+            let Some(m) = found else {
+                bail!(
+                    "수신참조로 지정한 empSeq '{emp}' 를 조직도 명부에서 찾지 못했다 — \
+                     find_person으로 정확한 empSeq를 확인할 것(명부는 부서 단위로 조립되어 \
+                     전사 인원보다 적을 수 있다)."
+                );
+            };
+            let dept_id = jstr(m.get("deptId"));
+            let name = jstr(m.get("name"));
+            if taken.contains(&("m".to_string(), emp.clone())) {
+                plan.skipped.push(json!({ "kind": "person", "id": emp, "name": name,
+                                          "reason": "이미 양식필수 수신참조에 포함됨" }));
+                continue;
+            }
+
+            if !raw_cache.contains_key(&dept_id) {
+                let raw = crate::modules::org::dept_members_raw(c, &dept_id).await?;
+                raw_cache.insert(dept_id.clone(), raw);
+            }
+            let raw = raw_cache.get(&dept_id).expect("방금 넣었다");
+            let Some(r) = raw.iter().find(|x| jstr(x.get("empSeq")) == *emp) else {
+                bail!(
+                    "수신참조 대상 '{name}'(empSeq {emp})의 조직도 원본 레코드를 부서 \
+                     {dept_id} 에서 찾지 못했다 — 부서 이동 직후일 수 있으니 find_person으로 재확인할 것."
+                );
+            };
+
+            seq += 1;
+            plan.added.push(person_refer_node(r, seq));
+            plan.persons.push(json!({ "empSeq": emp, "name": name }));
+        }
+    }
+
+    // ── 부서 ───────────────────────────────────────────────────────────────
+    if !depts.is_empty() {
+        let tree = crate::modules::org::dept_tree(c).await?;
+        let all = tree.get("depts").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        // deptId → 이름. 회사와 사업장이 deptId "1000"을 공유하므로 먼저 나온 쪽을 쓴다.
+        let mut name_of: std::collections::HashMap<String, String> = Default::default();
+        for d in &all {
+            name_of.entry(jstr(d.get("deptId"))).or_insert_with(|| jstr(d.get("name")));
+        }
+
+        for dept in &depts {
+            let Some(d) = all.iter().find(|x| jstr(x.get("deptId")) == *dept) else {
+                bail!(
+                    "수신참조로 지정한 부서 deptId '{dept}' 를 조직도 트리에서 찾지 못했다 — \
+                     org_chart로 부서 id를 확인할 것."
+                );
+            };
+            let name = jstr(d.get("name"));
+            if taken.contains(&("d".to_string(), dept.clone())) {
+                plan.skipped.push(json!({ "kind": "dept", "id": dept, "name": name,
+                                          "reason": "이미 양식필수 수신참조에 포함됨" }));
+                continue;
+            }
+            // 이름 경로: dept_tree의 path("1000|1000|2986|…")를 부서명으로 바꿔 잇는다.
+            let path_name = jstr(d.get("path"))
+                .split('|')
+                .filter(|x| !x.is_empty())
+                .map(|id| name_of.get(id).cloned().unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("|");
+
+            seq += 1;
+            plan.added.push(dept_refer_node(dept, &name, &path_name, &c.comp_seq(), seq));
+            plan.depts.push(json!({ "deptId": dept, "name": name }));
+        }
+    }
+
+    Ok(plan)
+}
+
+/// 공백을 털고 빈 값·중복을 걷어낸 목록(입력 순서 유지).
+fn dedup_trimmed(src: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    src.iter()
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .filter(|x| seen.insert(x.clone()))
+        .collect()
+}
+
+/// `Value`를 문자열로. 숫자도 문자열로 받는다(서버가 id를 양쪽으로 준다).
+fn jstr(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// 코드 문자열("600")을 정렬용 숫자로. 숫자가 아니면 `null`.
+fn order_of(code: &str) -> Value {
+    code.parse::<i64>().map(Value::from).unwrap_or(Value::Null)
+}
+
+/// 개인 수신참조 노드. `raw`는 `org::dept_members_raw`의 사원 레코드(gw102A02 원본).
+fn person_refer_node(raw: &Value, seq: usize) -> Value {
+    let g = |k: &str| jstr(raw.get(k));
+    let emp = g("empSeq");
+    let duty_cd = g("dutyCode");
+    let grade_cd = g("positionCode");
+    json!({
+        "doc_line_gb": "1", "div": "m", "org_div": "m",
+        "act_id": 5000, "act_order": 5000, "act_nm": "수신참조", "act_type": "40",
+        "user_id": emp, "org_id": emp, "user_nm": g("empName"),
+        "dept_id": g("deptSeq"), "dept_nm": g("deptName"), "dept_nm_disp": g("deptName"),
+        "dp_nm_disp": Value::Null,
+        "co_id": g("compSeq"), "co_nm": g("compName"),
+        "biz_id": g("bizSeq"), "biz_nm": g("bizName"),
+        "dept_line": false, "deptline_yn": "0",
+        "doc_line_m_seq": seq, "doc_line_mseq": seq, "seq": seq,
+        "doc_line_s_seq": 1, "doc_line_sseq": 1,
+        "duty_cd": duty_cd, "duty_nm": g("dutyName"), "duty_order": order_of(&duty_cd),
+        "grade_cd": grade_cd, "grade_nm": g("positionName"), "grade_order": order_of(&grade_cd),
+        "login_id": g("loginId"),
+        // 서버 노드의 path_name은 '|' 구분인데 조직도는 '>'로 준다(실측).
+        "path_name": g("pathName").replace('>', "|"),
+        "work_status": g("workStatus"), "work_order": 1,
+        // 양식이 강제한 참조자가 아니라 기안자가 더한 것이므로 must_yn=0.
+        "must_yn": "0", "app_yn": "0", "arbitary_yn": "0"
+    })
+}
+
+/// 부서 수신참조 노드. 부서는 사람과 달리 `user_id:"0"`이고 `org_id`가 deptId다.
+fn dept_refer_node(dept_id: &str, name: &str, path_name: &str, co_id: &str, seq: usize) -> Value {
+    json!({
+        "doc_line_gb": "1", "div": "d", "org_div": "d",
+        "act_id": 5000, "act_order": 5000, "act_nm": "수신참조", "act_type": "40",
+        "user_id": "0", "org_id": dept_id, "user_nm": name,
+        "dept_id": dept_id, "dept_nm": name, "dept_nm_disp": name,
+        "dp_nm_disp": Value::Null,
+        "co_id": co_id, "co_nm": "(주)이노그리드",
+        "biz_id": co_id, "biz_nm": "(주)이노그리드",
+        "dept_line": true, "deptline_yn": "1",
+        "doc_line_m_seq": seq, "doc_line_mseq": seq, "seq": seq,
+        "doc_line_s_seq": 1, "doc_line_sseq": 1,
+        "duty_cd": "", "duty_nm": "", "duty_order": Value::Null,
+        "grade_cd": "", "grade_nm": "", "grade_order": Value::Null,
+        "login_id": "", "path_name": path_name,
+        "work_status": "", "work_order": 1,
+        "must_yn": "0", "app_yn": "0", "arbitary_yn": "0"
+    })
 }
 
 /// 로컬 파일들을 ECM(`ecm001A01`)에 올리고 상신 payload 의 `pVCM_ATTACHFILEINFO` 항목으로 만든다.
@@ -1551,6 +1871,79 @@ mod tests {
         assert_eq!(&t[10..11], " ");
         assert_eq!(&t[13..14], ":");
         assert!(t.starts_with("20"));
+    }
+
+    /// 조립한 개인 수신참조 노드가 **브라우저 상신 캡처의 양식필수 노드와 같은 필드 구성**인지.
+    /// (`.claude-workspace/approval-analysis/captures/annual-half-am_eap110A06.json` 의 `pRefer[0]`
+    /// = 정영준. 서버가 모르는 모양을 조용히 버리므로 필드가 빠지면 반영이 말없이 실패한다.)
+    #[test]
+    fn 개인_수신참조_노드는_캡처와_같은_필드를_갖는다() {
+        let raw = json!({
+            "empSeq": "2246", "empName": "정영준", "loginId": "jyj",
+            "deptSeq": "3052", "deptName": "인사총무팀",
+            "dutyCode": "600", "dutyName": "팀원",
+            "positionCode": "900", "positionName": "사원",
+            "compSeq": "1000", "compName": "(주)이노그리드",
+            "bizSeq": "1000", "bizName": "(주)이노그리드",
+            "workStatus": "999",
+            "pathName": "(주)이노그리드>(주)이노그리드>경영지원부문>경영지원본부>인사지원실>인사총무팀"
+        });
+        let n = person_refer_node(&raw, 1);
+
+        // 서버가 수신참조로 알아보는 핵심 4종.
+        assert_eq!(n["act_id"], 5000, "수신참조 act_id");
+        assert_eq!(n["act_type"], "40");
+        assert_eq!(n["div"], "m");
+        assert_eq!(n["org_div"], "m");
+        // 사람은 user_id == org_id == empSeq (부서와 갈리는 지점).
+        assert_eq!(n["user_id"], "2246");
+        assert_eq!(n["org_id"], "2246");
+        assert_eq!(n["dept_line"], false);
+        assert_eq!(n["deptline_yn"], "0");
+        // 양식이 강제한 참조자가 아니다.
+        assert_eq!(n["must_yn"], "0");
+        // 정렬 코드는 숫자로.
+        assert_eq!(n["duty_order"], 600);
+        assert_eq!(n["grade_order"], 900);
+        // path_name 구분자는 '|' — 조직도는 '>'로 준다.
+        assert_eq!(
+            n["path_name"],
+            "(주)이노그리드|(주)이노그리드|경영지원부문|경영지원본부|인사지원실|인사총무팀"
+        );
+        // 캡처 노드의 키를 하나도 빠뜨리지 않았는지.
+        for k in [
+            "doc_line_gb", "org_div", "dept_nm_disp", "dept_line", "act_id", "deptline_yn",
+            "user_nm", "arbitary_yn", "div", "biz_nm", "dept_nm", "co_nm", "app_yn",
+            "doc_line_m_seq", "duty_order", "duty_cd", "work_status", "seq", "work_order",
+            "path_name", "grade_cd", "doc_line_mseq", "login_id", "act_order", "act_nm",
+            "co_id", "dp_nm_disp", "doc_line_sseq", "doc_line_s_seq", "grade_nm", "must_yn",
+            "user_id", "org_id", "act_type", "grade_order", "duty_nm", "biz_id", "dept_id",
+        ] {
+            assert!(n.get(k).is_some(), "캡처에 있는 필드 '{k}' 가 빠졌다");
+        }
+    }
+
+    /// 부서 노드는 사람과 달리 `user_id:"0"` 이고 `org_id` 가 deptId다(캡처 `pRefer[1]` = 인사총무팀).
+    #[test]
+    fn 부서_수신참조_노드는_user_id가_0이다() {
+        let n = dept_refer_node("3052", "인사총무팀", "(주)이노그리드|인사총무팀", "1000", 2);
+        assert_eq!(n["div"], "d");
+        assert_eq!(n["org_div"], "d");
+        assert_eq!(n["user_id"], "0", "부서 노드의 user_id는 0");
+        assert_eq!(n["org_id"], "3052", "부서 노드의 org_id는 deptId");
+        assert_eq!(n["dept_line"], true);
+        assert_eq!(n["deptline_yn"], "1");
+        assert_eq!(n["act_id"], 5000);
+        assert_eq!(n["must_yn"], "0");
+        assert_eq!(n["doc_line_m_seq"], 2, "순번은 양식필수 다음부터");
+    }
+
+    #[test]
+    fn 수신참조_대상은_공백과_중복을_걷어낸다() {
+        let got = dedup_trimmed(&[
+            " 3166 ".into(), "3166".into(), "".into(), "   ".into(), "2246".into(),
+        ]);
+        assert_eq!(got, vec!["3166".to_string(), "2246".to_string()]);
     }
 }
 

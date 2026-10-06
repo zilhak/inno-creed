@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod approval_body;
 pub mod approval_line;
 pub mod approval_line_suggest;
 pub mod approval_submit;

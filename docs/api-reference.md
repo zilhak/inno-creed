@@ -1032,6 +1032,12 @@ POST /eap/eap110A06   상신 → resultData.result = 신규 docId
 - ⚠️ `form_d_tp`는 **양식마다 다르다**(연차36 `_00011` / 출장40 `_00021` / 외근41 `_00031` / 휴일43 `_00051` / 휴직67 `_00015` / 교육42 `_00041`). 하드코딩 금지 — `eap110A03` 응답에서 동적 취득한다. 그래서 a03를 interlock 등록보다 먼저 호출한다.
 - casing 함정: `/system/`·`/personal/` 계열은 **`approKey`**(대문자 K), `eap110A03`/`A06`은 **`approkey`**(소문자).
 - `bindData`는 **이중 인코딩**(`JSON.stringify` 두 번)해 전송한다. 본문 HTML은 `encodeURIComponent`.
+- ⭐ **근태 5양식(36·38·40·43·67)의 본문(`doc_contents`)은 도구가 조립한다** — 아마란스는 본문 HTML을
+  만들어주지 않는다(브라우저 근태폼이 표를 조립해 보내고 서버는 저장만 한다). 한 줄 HTML을 보내면
+  **문서가 그 한 줄만 담긴 채 상신된다**(v2.3.4까지의 동작). 그래서 이 양식들에선 `doc_contents_html`을
+  무시하고 `approval_body`가 템플릿(`src/data/body_templates/`)으로 표를 만든다. 값은 interlock
+  `/human/attendapplication/interlock/getInterlockFormContents`(linkKey로 서버 계산본 bindData 반환 —
+  HTML은 없음)를 우선하고, 조회가 안 되면 호출자 `bindData`로 렌더한다.
 - 페이로드의 신원 필드(`coCd`/`deptCd`/`empCd`/이름)는 도구가 **로그인 사용자 값으로 덮어쓴다** — 가이드 예시에 박힌 타인 신원이 그대로 상신되는 것을 막기 위해서다.
 
 ### 상신취소 → `cancel_approval`
@@ -1101,8 +1107,8 @@ POST /eap/eap110A06   상신 → resultData.result = 신규 docId
   **즉시 종결**되어 한 번에 끝나지만, 원본이 정상 결재선(팀장→센터장)이면 **취소도 결재를 받아야
   하고 그 전까지 원본 근태는 살아 있다.** 즉 "즉시 취소"가 아니라 "취소 상신"이다 —
   도구가 `originStillActive`로 이를 구분해 돌려준다.
-- 본문(`doc_contents`)은 한 줄 요약 HTML로 통과한다. 실제 문서에 렌더되는 값은 `bindData`다
-  (상신 경로와 같은 규칙). `bindData`는 원본 신청값을 음수로 뒤집어 담고, 연차 집계는
+- 본문(`doc_contents`)은 한 줄 요약 HTML로 보낸다(상신은 통과한다). ⚠️ 상신 경로와 달리 **아직 표를
+  조립하지 않아** 문서 본문엔 그 한 줄만 보인다(위 `submit_approval` 본문 조립 항목 참조). `bindData`는 원본 신청값을 음수로 뒤집어 담고, 연차 집계는
   `/human/common/annualleave/getAnnualLeaveInfoOfEmployee`에서 온다.
 - ⛔ **되돌릴 수 없다** — 취소의 취소는 없다. 도구는 소유권(`appEmpCd`)을 확인하고, 같은 날
   신청이 여럿이면 임의로 고르지 않고 후보 목록과 함께 거부한다.

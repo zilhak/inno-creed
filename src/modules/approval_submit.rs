@@ -27,6 +27,7 @@ use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
 use crate::client::GwClient;
+use crate::modules::approval_body;
 use crate::modules::approval_line::LineShape;
 use crate::util::days_to_ymd;
 
@@ -538,6 +539,7 @@ async fn check_line_before_submit(c: &GwClient, line_id: i64) -> Result<()> {
 /// - `line_id`: 사용할 개인결재라인 ID. a03에 appLineId로 넘겨 완전 병합된 결재선을 받는다. save_approval_line으로 준비.
 /// - `bind_data_json`: KISS 폼 본문 데이터 JSON 텍스트(외근=`{"ITEMS":{...},"TABLE":{...}}`). 서버엔 이중인코딩되어 전송.
 /// - `doc_contents_html`: 표시용 본문 HTML(raw). 내부에서 encodeURIComponent로 인코딩해 전송.
+///   **근태 5양식에서는 무시된다** — `approval_body`가 bindData로 양식 표를 조립해 싣는다.
 /// - `numbering_id`: 채번 규칙(기본 "1001").
 ///
 /// - `cc_emp_seqs`/`cc_dept_ids`: **기안자가 직접 더하는 수신참조**(사람 empSeq / 부서 deptId).
@@ -662,6 +664,8 @@ pub async fn submit_approval(
     //   · saveAttendApplicationLinkKey(linkKey↔appSq 바인딩) 없으면 → "근태신청서 종결 처리 오류"
     // 브라우저는 이 콜들을 치지만 /system//personal/ 경로라 초기 캡처(/human//eap/만)가 놓쳤던 조각.
     // menuCode(HPD0110)는 근태 공통 상수지만 formDTp는 양식별(위 form_d_tp). 콜백 API는 eap가 상신 시 서버간 호출하는 HP 엔드포인트.
+    // 본문(doc_contents) 조립에도 쓰려고 블록 밖에 둔다 — HP가 이 키로 bindData를 돌려준다.
+    let mut link_key = String::new();
     if !hp_application_json.trim().is_empty() {
         let glk = c
             .call(
@@ -670,7 +674,7 @@ pub async fn submit_approval(
             )
             .await
             .map_err(|e| anyhow!("GetLinkKey 실패: {e}"))?;
-        let link_key = glk.get("linkKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        link_key = glk.get("linkKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
         // linkKey ↔ 실제 HP 신청(appSq) 바인딩. 없으면 finalize가 대상 신청을 못 찾아 '종결 처리 오류'.
         c.call(
             "/personal/hpd0110/saveAttendApplicationLinkKey",
@@ -762,7 +766,25 @@ pub async fn submit_approval(
         receive_list.push(recv_of(n, "10"));
     }
 
-    let doc_contents = encode_uri_component(doc_contents_html);
+    // ── 5) 본문(doc_contents) 조립 ───────────────────────────────────────────
+    // 근태 양식은 서버가 본문 HTML을 만들어주지 않는다(브라우저가 표를 조립해 보낸다 —
+    // `approval_body` 머리 주석의 실측 참조). 그래서 한 줄 HTML을 그대로 실으면 문서가
+    // 그 한 줄만 담긴 채 상신된다. 템플릿이 있는 양식이면 우리가 같은 표를 만들어 싣는다.
+    //
+    // 값은 **서버가 계산한 것**을 우선한다 — 연차 잔여/사용/차감 같은 집계는 HP가 정답을
+    // 쥐고 있어서, 호출자가 넘긴 bindData보다 interlock 조회분이 정확하다. 조회가 안 되면
+    // (linkKey 없음·비근태 경로) 호출자 bindData로 렌더한다.
+    let doc_contents_html = if approval_body::supports(form_id) {
+        let bind = fetch_interlock_bind(c, &link_key, &id.co)
+            .await
+            .unwrap_or(None)
+            .unwrap_or_else(|| bind_obj.clone());
+        approval_body::render(form_id, &bind)
+            .map_err(|e| anyhow!("본문 HTML 조립 실패(form_id={form_id}): {e}"))?
+    } else {
+        doc_contents_html.to_string()
+    };
+    let doc_contents = encode_uri_component(&doc_contents_html);
     let rep_dt = now_kst_datetime();
 
     // 첨부: 로컬 파일을 ECM 에 올리고 pVCM_ATTACHFILEINFO 항목으로 만든다(07 §11.5·§11.5.3).
@@ -1293,6 +1315,33 @@ fn icon_class(ext: &str) -> &'static str {
         "txt" => "icon_txt",
         _ => "icon_etc",
     }
+}
+
+/// HP interlock이 쥐고 있는 그 신청의 `bindData`(ITEMS/TABLE)를 받아온다.
+///
+/// 응답은 `{contents:"<bindData JSON 문자열>", title}` 뿐이다 — **HTML은 안 준다**(실측).
+/// `resultCode`가 없는 응답이라 `call`의 성공판정에 걸리므로 `call_raw`로 받는다.
+/// 본문에 박히는 연차 잔여·사용·차감 같은 집계의 정답이 여기 있다.
+async fn fetch_interlock_bind(c: &Arc<GwClient>, link_key: &str, co_cd: &str) -> Result<Option<Value>> {
+    if link_key.trim().is_empty() {
+        return Ok(None);
+    }
+    let r = c
+        .call_raw(
+            "/human/attendapplication/interlock/getInterlockFormContents",
+            &json!({"linkKey": link_key, "coCd": co_cd, "vPCoCd": co_cd}),
+        )
+        .await?;
+    let s = r
+        .pointer("/response/contents")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    Ok(serde_json::from_str(&s).ok())
 }
 
 /// approkey = "ERP_<uuid4-ish>" — 16 랜덤바이트를 uuid 포맷으로.

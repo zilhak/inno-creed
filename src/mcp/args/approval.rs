@@ -164,9 +164,15 @@ pub struct SubmitApprovalArgs {
     pub line_id: i64,
     /// HP 근태신청 저장 요청 body JSON(0hr00011 + create 두 콜에 쓰임). **근태 양식 전용** — 이걸 넘기면 상신 전에 HP 신청 레코드 생성 + interlock 등록(GetLinkKey→saveAttendApplicationLinkKey→SetEnageGroup)까지 수행한다. ⭐ **채우는 법·양식별 고정코드·복사용 예시는 `get_approval_submission_guide(form_id).guide.draftHelp.hpApplicationExample`**(예: 출장 linkAtCd"2010"/atCd"2101", 외근 종일 atCd"3101"/linkAtCd"3010"). 신원 필드(coCd/deptCd/empCd/empNm/korNm)는 **submit_approval이 로그인 사용자 값으로 자동 덮어씀** — 예시값 그대로 둬도 됨. 형식: `{"applicationList":[{...,linkAtCd,atCd,atDt,startDt,endDt,startTm,endTm,appDyFg,appDy,appTm,...}],"employeeList":[{...}]}`. 빈 문자열이면 이 단계 전체 생략(= 비근태 양식 경로, 아직 미검증).
     pub hp_application_json: String,
-    /// 폼 본문 데이터 JSON 텍스트. `{"ITEMS":{...},"TABLE":{"dbTable1":{...},"dbTable2":{...}}}`. ⭐ **양식별 예시는 `get_approval_submission_guide(form_id).guide.draftHelp.bindDataExample`**. 실제 결재문서에 렌더되는 값이 이것(doc_contents_html이 아님). 서버엔 이중인코딩되어 전송됨.
+    /// 폼 본문 데이터 JSON 텍스트. `{"ITEMS":{...},"TABLE":{"dbTable1":{...},"dbTable2":{...}}}`. ⭐ **양식별 예시는 `get_approval_submission_guide(form_id).guide.draftHelp.bindDataExample`**. 서버엔 이중인코딩되어 전송됨.
+    /// 근태 양식에서는 이 값이 **문서 본문 표의 재료**도 된다 — 다만 상신 직전에 HP interlock에서
+    /// 서버 계산본(연차 잔여·사용·차감 등)을 받아오면 그쪽을 우선 쓰고, 조회가 안 될 때만 이 값으로 렌더한다.
     pub bind_data_json: String,
-    /// 표시용 본문 HTML(raw). 내부에서 encodeURIComponent로 인코딩해 전송. 근태 양식은 본문이 bindData/HP연동으로 채워지므로 **한 줄 요약 HTML(예 `<div>2026-12-16 종일외근</div>`)로도 상신이 통과**한다(4양식 실증). 브라우저는 양식 표 전체를 조립해 보내므로, 문서 뷰 표시 품질까지 맞추려면 표 HTML이 필요(미검증). 빈 문자열 가능 여부는 미확인.
+    /// 표시용 본문 HTML(raw). 내부에서 encodeURIComponent로 인코딩해 전송.
+    /// ⚠️ **근태 5양식(36·38·40·43·67)에서는 이 값이 무시된다** — 아마란스는 본문 HTML을 만들어주지
+    /// 않으므로(근태폼 화면이 표를 조립해 보내는 구조) `submit_approval`이 bindData로 같은 표를
+    /// 조립해 싣는다. 예전처럼 한 줄 HTML을 주면 **문서가 그 한 줄만 담긴 채 상신된다**(v2.3.4까지의
+    /// 실제 사고). 템플릿이 없는 비근태 양식에서만 이 값이 그대로 본문이 된다.
     pub doc_contents_html: String,
     /// 첨부할 로컬 파일 경로 목록(선택). 서버가 도는 머신 기준 절대경로. 비우면 첨부 없이 상신한다.
     /// 파일은 상신 직전에 ECM 에 올라가며, 상신이 실패하면 **문서에 안 붙은 채 ECM 에 남는다**(고아).
